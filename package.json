@@ -1,0 +1,49 @@
+{
+  "name": "viberunner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "// -- Diagnostics --": "Run these to verify a clean checkout / new dev environment.",
+    "tauri:info": "tauri info",
+    "typecheck": "tsc --noEmit",
+    "check:rust": "cd src-tauri && cargo check",
+    "test:rust": "cd src-tauri && cargo test --lib",
+    "test": "pnpm typecheck && pnpm test:rust",
+    "verify": "pnpm test && pnpm tauri build --debug",
+    "// -- App build --": "Production bundles. The first command is what you want for 'produce a .dmg/.msi to share'.",
+    "build:mac": "tauri build && pnpm dmg:custom",
+    "build:mac:universal": "tauri build --target universal-apple-darwin && pnpm dmg:custom",
+    "build:win": "tauri build",
+    "build:linux": "tauri build",
+    "build:debug": "tauri build --debug",
+    "dmg:custom": "node scripts/run-make-dmg.mjs",
+    "dmg:background:regen": "python3 scripts/generate-dmg-background.py",
+    "// -- Tooling --": "Useful one-offs.",
+    "icon": "tauri icon assets/icon-source.png",
+    "icon:regen": "python3 scripts/generate-icon.py && pnpm icon"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-notification": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-updater": "^2.11.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}

@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Frontend build output
+/dist/
+/dist-ssr/
+/build/
+*.tsbuildinfo
+
+# Rust / Tauri build output
+/target/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Environment files and local overrides
+.env
+.env.*
+!.env.example
+!.env.template
+*.local
+
+# Tauri signing material — never commit private keys or certificates.
+/src-tauri/.tauri-updater-key
+*.p12
+*.pfx
+
+# Logs, reports, coverage, and temporary files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+coverage/
+.cache/
+.tmp/
+tmp/
+
+# Generated release artifacts
+/release/
+/artifacts/
+*.AppImage
+*.deb
+*.dmg
+*.msi
+*.rpm
+
+# Python helpers used by the asset-generation scripts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor directories and operating-system files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

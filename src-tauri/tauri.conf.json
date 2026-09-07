@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VibeRunner",
+  "version": "0.1.0",
+  "identifier": "com.viberunner.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "VibeRunner",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "George Paterakis",
+    "category": "DeveloperTool",
+    "shortDescription": "Cross-platform runner manager for your dev apps",
+    "longDescription": "VibeRunner lets you define start/stop commands for each of your dev apps in a single vibe.config.json, then control them from one window. Start, stop, restart, watch live logs in a real terminal, and see which ports each app is listening on — without alt-tabbing between terminal tabs.",
+    "copyright": "© 2026 George Paterakis",
+    "homepage": "https://github.com/georgepaterakis/viberunner",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "dmg": {
+        "background": "../assets/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 420
+        },
+        "appPosition": {
+          "x": 160,
+          "y": 190
+        },
+        "applicationFolderPosition": {
+          "x": 500,
+          "y": 190
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://github.com/georgepaterakis/viberunner/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBQUQ4OERGQTcwRkQ3MQpSV1J4L1hENmpkaXFBb2lVN1pUN1M2QnlyQlorWXdvOFFHSS9Bcnd3bDBHdkRCcnNIUW5WVDhkMAo=",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

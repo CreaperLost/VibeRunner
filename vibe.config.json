@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "projects": [
+    {
+      "id": "assetflow",
+      "path": "/Users/you/projects/AssetFlow-AI"
+    },
+    {
+      "id": "axm",
+      "path": "/Users/you/projects/Automated-X-Manager"
+    },
+    {
+      "id": "detached-demo",
+      "name": "Detached Demo (manual)",
+      "path": "/Users/you/projects/static",
+      "manual": true,
+      "setup": { "command": "" },
+      "actions": [
+        {
+          "name": "Run",
+          "icon": "run",
+          "command": "python3 -m http.server 8080",
+          "detached": true
+        },
+        {
+          "name": "Stop",
+          "icon": "stop",
+          "command": "lsof -ti tcp:8080 | xargs kill -9"
+        }
+      ]
+    }
+  ]
+}
