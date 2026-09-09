@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "clean": "node scripts/clean.mjs",
+    "clean:all": "node scripts/clean.mjs --all",
+    "prebuild": "node scripts/clean.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

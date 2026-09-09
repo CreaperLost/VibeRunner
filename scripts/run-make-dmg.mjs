@@ -73,6 +73,12 @@ if (existsSync(defaultDmg)) {
   rmSync(defaultDmg);
 }
 
+// Clean up Tauri's default bundler script if present
+const tauriScript = resolve(dmgDir, "bundle_dmg.sh");
+if (existsSync(tauriScript)) {
+  rmSync(tauriScript, { force: true });
+}
+
 const outDmg = defaultDmg; // same path, custom contents
 
 try {

@@ -39,6 +39,11 @@ if [[ ! -f "$BG_SRC" ]]; then
   exit 1
 fi
 
+# Clean up any leftover temporary build directories from previous aborted runs.
+if [[ -d "$(dirname "$OUT_DMG")" ]]; then
+  find "$(dirname "$OUT_DMG")" -maxdepth 1 -name ".dmg-build.*" -exec rm -rf {} + 2>/dev/null || true
+fi
+
 # Pick a fresh temporary build directory under the output folder.
 # RAW_DMG is placed in BUILD_DIR outside STAGE_DIR so it is never
 # included in the disk image contents.

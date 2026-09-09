@@ -238,6 +238,8 @@ pnpm tauri:info         # toolchain + package versions
 pnpm typecheck          # tsc --noEmit
 pnpm test:rust          # cargo test --lib (14 tests)
 pnpm test               # typecheck + test:rust
+pnpm clean              # remove frontend dist/ and temp build files
+pnpm clean:all          # remove dist/, src-tauri/target/, and generated schemas
 pnpm verify             # test + tauri build --debug (slow, full pipeline)
 ```
 
