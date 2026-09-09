@@ -1386,7 +1386,7 @@ fn spawn_port_poller(
             handle.add_tracked_pids(tracked.iter().copied());
 
             let pids_vec: Vec<u32> = tracked.into_iter().collect();
-            let mut ports = ports::detect_ports_for_pids(&pids_vec);
+            let mut ports = ports::detect_ports_for_project(&project_path, &pids_vec);
 
             // Also check recently modified log files for any output URLs/ports
             if ports.is_empty() {

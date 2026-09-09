@@ -108,6 +108,7 @@ export function ProjectDetail({
 
   const [logExpanded, setLogExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
   const logActionsRef = useRef<LogViewerHandle | null>(null);
 
   const handleCopyLogs = async () => {
@@ -304,11 +305,11 @@ export function ProjectDetail({
           <div className="log-panel__controls">
             <button
               type="button"
-              className="btn btn--tiny"
+              className={`btn btn--tiny${isScrolledUp ? " btn--active" : ""}`}
               onClick={() => logActionsRef.current?.scrollToBottom()}
-              title="Scroll to bottom"
+              title={isScrolledUp ? "Jump to live bottom" : "At bottom"}
             >
-              ↓ Bottom
+              ↓ Bottom{isScrolledUp ? " •" : ""}
             </button>
             <button
               type="button"
@@ -342,6 +343,7 @@ export function ProjectDetail({
           onActionsReady={(actions) => {
             logActionsRef.current = actions;
           }}
+          onScrolledUpChange={setIsScrolledUp}
         />
       </section>
 

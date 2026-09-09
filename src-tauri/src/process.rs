@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Parse a user-friendly keystroke string into raw bytes for the PTY.
 ///
@@ -51,7 +51,11 @@ pub const GRACE_AFTER_SIGTERM: Duration = Duration::from_secs(3);
 #[allow(dead_code)]
 pub fn collect_descendants(root_pid: u32) -> Vec<u32> {
     let mut sys = System::new_all();
-    sys.refresh_processes(ProcessesToUpdate::All, false);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        false,
+        ProcessRefreshKind::everything(),
+    );
     collect_descendants_in(&sys, root_pid)
 }
 
@@ -89,7 +93,11 @@ pub fn any_descendant_alive(root_pid: u32) -> bool {
         return false;
     }
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
     let tree = collect_descendants_in(&sys, root_pid);
     tree.iter()
         .any(|pid| sys.process(Pid::from_u32(*pid)).is_some())
@@ -106,7 +114,11 @@ pub fn update_and_check_alive(tracked: &mut HashSet<u32>, root_pid: u32) -> bool
         tracked.insert(root_pid);
     }
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
 
     let mut added = true;
     while added {

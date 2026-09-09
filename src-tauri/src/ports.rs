@@ -29,10 +29,14 @@ pub fn detect_ports_for_tree(root_pid: u32) -> Vec<u16> {
 
 /// Aggregates listening ports for all given PIDs and their descendants.
 pub fn detect_ports_for_pids(pids: &[u32]) -> Vec<u16> {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
 
     // Walk the tree.
     let mut tree: Vec<u32> = Vec::new();
@@ -106,6 +110,86 @@ pub fn detect_ports_for_pids(pids: &[u32]) -> Vec<u16> {
     all_ports
 }
 
+/// Detect listening ports for a project given its root folder and runner PIDs.
+/// Aggregates:
+/// 1. Listening ports from `pids` and their descendants in the process tree.
+/// 2. Listening ports from any active process whose CWD or command line matches `project_path`.
+pub fn detect_ports_for_project(project_path: &std::path::Path, pids: &[u32]) -> Vec<u16> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let mut all_ports = detect_ports_for_pids(pids);
+
+    // Also scan all listening ports and see if any listening process belongs to `project_path`
+    #[cfg(unix)]
+    {
+        if let Ok(output) = lsof_command()
+            .args(["-iTCP", "-sTCP:LISTEN", "-P", "-n"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut sys = System::new();
+                sys.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::everything(),
+                );
+
+                for line in stdout.lines().skip(1) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    if let Ok(pid) = parts[1].parse::<u32>() {
+                        if let Some(port) = extract_port(line) {
+                            if all_ports.contains(&port) {
+                                continue;
+                            }
+                            let path_str = project_path.to_string_lossy();
+                            let belongs_to_project = if let Some(proc) = sys.process(Pid::from_u32(pid)) {
+                                let cwd_matches = proc.cwd().map(|c| c.starts_with(project_path)).unwrap_or(false);
+                                let cmd_matches = proc.cmd().iter().any(|arg| arg.to_string_lossy().contains(path_str.as_ref()));
+                                cwd_matches || cmd_matches
+                            } else {
+                                false
+                            };
+
+                            if belongs_to_project {
+                                all_ports.push(port);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::everything(),
+        );
+        let path_str = project_path.to_string_lossy();
+        for (pid, proc) in sys.processes() {
+            let pid_u32 = pid.as_u32();
+            let cwd_matches = proc.cwd().map(|c| c.starts_with(project_path)).unwrap_or(false);
+            let cmd_matches = proc.cmd().iter().any(|arg| arg.to_string_lossy().contains(path_str.as_ref()));
+            if cwd_matches || cmd_matches {
+                for p in detect_ports(pid_u32) {
+                    if !all_ports.contains(&p) {
+                        all_ports.push(p);
+                    }
+                }
+            }
+        }
+    }
+
+    all_ports
+}
+
 #[cfg(unix)]
 fn lsof_command() -> std::process::Command {
     if std::path::Path::new("/usr/sbin/lsof").exists() {
@@ -138,6 +222,45 @@ fn unix_lsof(pid: u32) -> Vec<u16> {
     }
 }
 
+/// Strip ANSI escape sequences (CSI and OSC codes) from terminal output.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch.is_ascii_alphabetic() || ch == '~' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' || ch == '\x1b' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('(') | Some(')') | Some('#') | Some('%') => {
+                    chars.next();
+                    chars.next();
+                    continue;
+                }
+                _ => continue,
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Extract valid TCP listening ports from process stdout / stderr or log output.
 /// Matches patterns like:
 ///   http://localhost:8501
@@ -146,9 +269,10 @@ fn unix_lsof(pid: u32) -> Vec<u16> {
 ///   URL: http://127.0.0.1:8501
 ///   port 8080, port: 8080, PORT=8080
 pub fn extract_ports_from_text(text: &str) -> Vec<u16> {
+    let clean = strip_ansi(text);
     let mut ports = Vec::new();
 
-    for line in text.lines() {
+    for line in clean.lines() {
         // 1. Scan for URLs: http://...:PORT or https://...:PORT
         let mut rem = line;
         while let Some(proto_idx) = rem.find("http://").or_else(|| rem.find("https://")) {
@@ -339,19 +463,14 @@ node    12345 user   24u  IPv4  0t0     TCP 127.0.0.1:8080 (LISTEN)
             .spawn()
             .expect("Failed to spawn python3");
         let pid = child.id();
-        std::thread::sleep(std::time::Duration::from_millis(800));
-
-        let lsof_res = Command::new("lsof")
-            .args(["-a", "-iTCP", "-sTCP:LISTEN", "-P", "-n", "-p", &pid.to_string()])
-            .output();
-        println!("Direct lsof res: {:?}", lsof_res);
-        if let Ok(ref o) = lsof_res {
-            println!("Direct stdout: {}", String::from_utf8_lossy(&o.stdout));
-            println!("Direct stderr: {}", String::from_utf8_lossy(&o.stderr));
-            println!("Direct status: {:?}", o.status);
+        let mut ports = Vec::new();
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            ports = detect_ports_for_pids(&[pid]);
+            if ports.contains(&9871) {
+                break;
+            }
         }
-
-        let ports = detect_ports_for_pids(&[pid]);
         let _ = child.kill();
         let _ = child.wait();
         assert!(ports.contains(&9871), "Expected 9871 in detected ports, got: {:?}", ports);
@@ -373,6 +492,21 @@ node    12345 user   24u  IPv4  0t0     TCP 127.0.0.1:8080 (LISTEN)
 
         let sample5 = "Server listening on port 3000";
         assert_eq!(extract_ports_from_text(sample5), vec![3000]);
+
+        // Vite with ANSI bold and color codes (AeroShoot.AI scenario)
+        let vite_ansi = "  \x1b[32m➜\x1b[39m  \x1b[1mLocal:\x1b[22m   \x1b[36mhttp://127.0.0.1:\x1b[1m1420\x1b[22m/\x1b[39m\n  \x1b[32m➜\x1b[39m  \x1b[1mNetwork:\x1b[22m use \x1b[32m--host\x1b[39m to expose";
+        assert_eq!(extract_ports_from_text(vite_ansi), vec![1420]);
+
+        let vite_ansi2 = "  ➜  Local:   \x1b[36mhttp://localhost:\x1b[1m1420\x1b[22m/\x1b[39m";
+        assert_eq!(extract_ports_from_text(vite_ansi2), vec![1420]);
+    }
+
+    #[test]
+    fn test_detect_ports_for_project_portable() {
+        let temp = std::env::temp_dir();
+        let ports = detect_ports_for_project(&temp, &[]);
+        // Must succeed without panicking
+        let _ = ports;
     }
 }
 

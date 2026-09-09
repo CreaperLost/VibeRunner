@@ -10,12 +10,14 @@ export interface LogViewerHandle {
   scrollToBottom: () => void;
   clear: () => void;
   copyLogs: () => Promise<boolean>;
+  isScrolledUp: () => boolean;
 }
 
 interface LogViewerProps {
   projectId: string;
   expanded?: boolean;
   onActionsReady?: (actions: LogViewerHandle) => void;
+  onScrolledUpChange?: (scrolledUp: boolean) => void;
 }
 
 // Global in-memory log replay buffer per project.
@@ -72,7 +74,12 @@ function initGlobalOutputListener() {
  *   back to the PTY via the `write_to_pty` command.
  * - Re-fits on container resize and expanded state toggle.
  */
-export function LogViewer({ projectId, expanded = false, onActionsReady }: LogViewerProps) {
+export function LogViewer({
+  projectId,
+  expanded = false,
+  onActionsReady,
+  onScrolledUpChange,
+}: LogViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
 
@@ -106,6 +113,21 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
     term.loadAddon(fit);
     term.open(container);
 
+    let userScrolledUp = false;
+
+    // Track user scrolling: if user manually scrolls away from the bottom, pause auto-scroll
+    const scrollSub = term.onScroll(() => {
+      const buffer = term.buffer.active;
+      const atBottom = buffer.viewportY >= buffer.baseY - 1;
+      if (atBottom && userScrolledUp) {
+        userScrolledUp = false;
+        onScrolledUpChange?.(false);
+      } else if (!atBottom && !userScrolledUp) {
+        userScrolledUp = true;
+        onScrolledUpChange?.(true);
+      }
+    });
+
     const syncPty = () => {
       try {
         fit.fit();
@@ -126,6 +148,8 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
     // Expose actions to parent
     onActionsReady?.({
       scrollToBottom: () => {
+        userScrolledUp = false;
+        onScrolledUpChange?.(false);
         term.scrollToBottom();
       },
       clear: () => {
@@ -157,6 +181,7 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
         }
         return false;
       },
+      isScrolledUp: () => userScrolledUp,
     });
 
     // Replay any buffered logs for this project and scroll to bottom
@@ -164,7 +189,16 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
     if (buffered && buffered.chunks.length > 0) {
       for (let i = 0; i < buffered.chunks.length; i++) {
         const isLast = i === buffered.chunks.length - 1;
-        term.write(buffered.chunks[i], isLast ? () => term.scrollToBottom() : undefined);
+        term.write(
+          buffered.chunks[i],
+          isLast
+            ? () => {
+                userScrolledUp = false;
+                onScrolledUpChange?.(false);
+                term.scrollToBottom();
+              }
+            : undefined
+        );
       }
     }
 
@@ -178,25 +212,14 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
     // Subscribe to live output events for this project
     const onOutput: OutputSubscriber = (id, chunk) => {
       if (id === projectId) {
-        const buffer = term.buffer.active;
-        const isNearBottom = buffer.viewportY >= buffer.baseY - 2;
         term.write(chunk, () => {
-          if (isNearBottom) {
+          if (!userScrolledUp) {
             term.scrollToBottom();
           }
         });
       }
     };
     subscribers.add(onOutput);
-
-    // Explicit container mouse wheel scroll support
-    const handleWheel = (e: WheelEvent) => {
-      if (e.deltaY !== 0) {
-        const lines = Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 25));
-        term.scrollLines(lines);
-      }
-    };
-    container.addEventListener("wheel", handleWheel, { passive: true });
 
     // Re-fit when container size changes
     const ro = new ResizeObserver(() => {
@@ -205,8 +228,8 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
     ro.observe(container);
 
     return () => {
-      container.removeEventListener("wheel", handleWheel);
       subscribers.delete(onOutput);
+      scrollSub.dispose();
       sub.dispose();
       ro.disconnect();
       term.dispose();
@@ -226,11 +249,9 @@ export function LogViewer({ projectId, expanded = false, onActionsReady }: LogVi
     return () => clearTimeout(timer);
   }, [expanded]);
 
-
   return (
-    <div
-      ref={containerRef}
-      className={`log-viewer${expanded ? " log-viewer--expanded" : ""}`}
-    />
+    <div className={`log-viewer${expanded ? " log-viewer--expanded" : ""}`}>
+      <div ref={containerRef} className="log-viewer__terminal" />
+    </div>
   );
 }
