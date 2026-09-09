@@ -185,6 +185,23 @@ function App() {
     []
   );
 
+  const buildProject = useCallback(
+    async (projectId: string) => {
+      setPendingId(projectId);
+      setError(null);
+      try {
+        await invoke("build_project", { projectId });
+      } catch (e) {
+        setError(
+          `build_project failed: ${typeof e === "string" ? e : String(e)}`
+        );
+      } finally {
+        setPendingId((cur) => (cur === projectId ? null : cur));
+      }
+    },
+    []
+  );
+
   const stopProject = useCallback(async (projectId: string) => {
     setPendingId(projectId);
     setError(null);
@@ -367,6 +384,7 @@ function App() {
           pending={pendingId === selectedId}
           onRunAction={runAction}
           onSetup={setupProject}
+          onBuild={buildProject}
           onStop={stopProject}
           onRestart={restartProject}
         />

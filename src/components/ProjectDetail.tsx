@@ -19,6 +19,7 @@ interface ProjectDetailProps {
   pending: boolean;
   onRunAction: (projectId: string, actionName: string) => void;
   onSetup: (projectId: string) => void;
+  onBuild?: (projectId: string) => void;
   onStop: (projectId: string) => void;
   onRestart: (projectId: string) => void;
 }
@@ -52,6 +53,7 @@ export function ProjectDetail({
   pending,
   onRunAction,
   onSetup,
+  onBuild,
   onStop,
   onRestart,
 }: ProjectDetailProps) {
@@ -67,15 +69,28 @@ export function ProjectDetail({
 
   const isActive =
     status === "running" || status === "starting" || status === "stopping";
+  const isCrashed = status === "crashed";
   const canRunAction = !pending && !isActive;
-  const canStop = !pending && isActive;
+  const canStop = !pending && (isActive || isCrashed);
   const canRestart = !pending;
 
   // The implicit "Setup" action is the first one with name "Setup".
   const setupAction = project.actions.find((a) => a.name === "Setup") ?? null;
-  // User-defined actions: everything except the implicit Setup and Stop (which has its own dedicated button).
+  // The "Build" action if configured or present.
+  const buildAction =
+    project.actions.find(
+      (a) =>
+        (a.name.toLowerCase() === "build" || a.icon === "build") &&
+        a.name !== "Setup"
+    ) ?? null;
+  // User-defined actions: everything except the implicit Setup, Build, and Stop (which have their own dedicated buttons).
   const userActions = project.actions.filter(
-    (a) => a.name !== "Setup" && a.name.toLowerCase() !== "stop" && a.icon !== "stop"
+    (a) =>
+      a.name !== "Setup" &&
+      a.name.toLowerCase() !== "build" &&
+      a.icon !== "build" &&
+      a.name.toLowerCase() !== "stop" &&
+      a.icon !== "stop"
   );
   const hasRestart = project.primaryAction !== null;
 
@@ -183,6 +198,18 @@ export function ProjectDetail({
             onClick={() => onSetup(project.id)}
           />
         )}
+        {buildAction && (
+          <ActionButton
+            action={buildAction}
+            disabled={!canRunAction}
+            title={`Run build (${buildAction.command})`}
+            onClick={() =>
+              onBuild
+                ? onBuild(project.id)
+                : onRunAction(project.id, buildAction.name)
+            }
+          />
+        )}
         {userActions.map((a) => (
           <ActionButton
             key={a.name}
@@ -194,12 +221,16 @@ export function ProjectDetail({
         ))}
         <button
           type="button"
-          className="btn"
+          className={`btn ${isCrashed ? "btn--warning" : ""}`}
           onClick={() => onStop(project.id)}
           disabled={!canStop}
-          title="Stop the project (runs stop script or terminates processes)"
+          title={
+            isCrashed
+              ? "Clean up crashed application (runs stop script and terminates remaining processes)"
+              : "Stop the project (runs stop script or terminates processes)"
+          }
         >
-          ■ Stop
+          ■ {isCrashed ? "Stop (Cleanup)" : "Stop"}
         </button>
         <button
           type="button"

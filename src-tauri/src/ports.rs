@@ -377,6 +377,7 @@ fn parse_lsof(output: &str) -> Vec<u16> {
 ///
 ///   TCP    0.0.0.0:4000    0.0.0.0:0    LISTENING    12345
 ///   TCP    [::]:4000       [::]:0        LISTENING    12345
+#[allow(dead_code)]
 fn parse_netstat(output: &str, target_pid: u32) -> Vec<u16> {
     let mut ports = Vec::new();
     for line in output.lines() {

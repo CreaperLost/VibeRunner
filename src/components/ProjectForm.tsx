@@ -20,6 +20,7 @@ interface FormState {
   path: string;
   primaryAction: string;
   setupCommand: string;
+  buildCommand: string;
   actions: ActionConfig[];
 }
 
@@ -31,6 +32,7 @@ function emptyForm(): FormState {
     path: "",
     primaryAction: "",
     setupCommand: "",
+    buildCommand: "",
     actions: [
       { name: "Run", icon: "run", command: "", detached: false },
       { name: "Stop", icon: "stop", command: "", detached: false },
@@ -134,6 +136,9 @@ export function ProjectForm({ existingIds, onClose, onAdded }: ProjectFormProps)
         manual: form.mode === "manual",
         setup: form.setupCommand.trim()
           ? { command: form.setupCommand.trim() }
+          : null,
+        build: form.buildCommand.trim()
+          ? { command: form.buildCommand.trim() }
           : null,
         actions: form.mode === "manual" ? form.actions : [],
         env: {},
@@ -264,6 +269,20 @@ export function ProjectForm({ existingIds, onClose, onAdded }: ProjectFormProps)
                     value={form.setupCommand}
                     onChange={(e) => setField("setupCommand", e.target.value)}
                     placeholder="e.g. npm install"
+                  />
+                </div>
+              </fieldset>
+
+              <fieldset className="form-section">
+                <legend>Build (optional)</legend>
+                <div className="form-row">
+                  <label htmlFor="pf-build">command</label>
+                  <input
+                    id="pf-build"
+                    type="text"
+                    value={form.buildCommand}
+                    onChange={(e) => setField("buildCommand", e.target.value)}
+                    placeholder="e.g. npm run build"
                   />
                 </div>
               </fieldset>

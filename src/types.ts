@@ -48,6 +48,7 @@ export interface ProjectConfig {
   /** Skip TOML discovery and use the inline setup + actions. */
   manual: boolean;
   setup?: ManualCommand | null;
+  build?: ManualCommand | null;
   actions: ActionConfig[];
   env: Record<string, string>;
   autoRestart?: RestartPolicy | null;

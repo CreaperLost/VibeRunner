@@ -103,6 +103,9 @@ pub fn spawn(
         })
         .map_err(|e| format!("openpty failed: {e}"))?;
 
+    #[cfg(unix)]
+    ensure_script_executable(project_path, command);
+
     let mut cmd = shell_command(command);
     cmd.cwd(project_path);
 
@@ -169,6 +172,54 @@ fn shell_argv0() -> &'static str {
 fn shell_flag() -> &'static str {
     "/C"
 }
+
+#[cfg(unix)]
+fn ensure_script_executable(project_path: &Path, command: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    for word in command.split_whitespace() {
+        let clean = word
+            .trim_matches(|c| c == '\'' || c == '"')
+            .trim_start_matches("./");
+        if clean.ends_with(".sh") || clean.ends_with(".bash") {
+            let script_path = project_path.join(clean);
+            if script_path.is_file() {
+                if let Ok(metadata) = std::fs::metadata(&script_path) {
+                    let mut perms = metadata.permissions();
+                    let mode = perms.mode();
+                    if mode & 0o111 == 0 {
+                        perms.set_mode(mode | 0o755);
+                        let _ = std::fs::set_permissions(&script_path, perms);
+                    }
+                }
+            }
+        }
+    }
+
+    for dir_name in ["script", "scripts"] {
+        let dir = project_path.join(dir_name);
+        if dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("sh") {
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            let mut perms = metadata.permissions();
+                            let mode = perms.mode();
+                            if mode & 0o111 == 0 {
+                                perms.set_mode(mode | 0o755);
+                                let _ = std::fs::set_permissions(&path, perms);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_script_executable(_project_path: &Path, _command: &str) {}
 
 // `Child` and `ChildKiller` aren't used directly here, but re-exporting
 // them from this module keeps the call sites tidy.

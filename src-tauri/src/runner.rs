@@ -324,4 +324,29 @@ mod tests {
         assert!(token.load(Ordering::SeqCst));
         assert!(handle.is_restart_cancelled());
     }
+
+    #[test]
+    fn status_is_active_categorizes_states() {
+        assert!(Status::Running.is_active());
+        assert!(Status::Starting.is_active());
+        assert!(Status::Stopping.is_active());
+        assert!(!Status::Stopped.is_active());
+        assert!(!Status::Crashed.is_active());
+    }
+
+    #[test]
+    fn runner_handle_crashed_cleanup_resets_to_stopped() {
+        let handle = Arc::new(RunnerHandle::new("test-crash".into()));
+        handle.set_status(Status::Crashed);
+        assert_eq!(handle.status(), Status::Crashed);
+
+        // Stopping transition during cleanup
+        handle.set_status(Status::Stopping);
+        assert_eq!(handle.status(), Status::Stopping);
+
+        // After cleanup completes
+        handle.clear_runtime();
+        handle.set_status(Status::Stopped);
+        assert_eq!(handle.status(), Status::Stopped);
+    }
 }

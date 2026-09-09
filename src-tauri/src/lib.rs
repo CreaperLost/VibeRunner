@@ -53,6 +53,7 @@ pub fn run() {
             commands::remove_project,
             commands::run_action,
             commands::setup_project,
+            commands::build_project,
             commands::stop_project,
             commands::restart_project,
             commands::write_to_pty,

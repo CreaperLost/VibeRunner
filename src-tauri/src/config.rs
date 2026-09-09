@@ -120,6 +120,10 @@ pub struct ProjectConfig {
     /// "Setup" action.
     #[serde(default)]
     pub setup: Option<ManualCommand>,
+    /// Inline build command for manual projects. Becomes the implicit
+    /// "Build" action.
+    #[serde(default)]
+    pub build: Option<ManualCommand>,
     /// Inline action list for manual projects.
     #[serde(default)]
     pub actions: Vec<ActionConfig>,
@@ -200,6 +204,8 @@ struct TomlEnvironment {
     #[serde(default)]
     setup: Option<TomlScript>,
     #[serde(default)]
+    build: Option<TomlScript>,
+    #[serde(default)]
     actions: Vec<TomlAction>,
 }
 
@@ -211,6 +217,21 @@ fn default_toml_version() -> u32 {
 struct TomlScript {
     #[serde(default)]
     script: String,
+    #[serde(default)]
+    command: Option<String>,
+}
+
+impl TomlScript {
+    fn command_str(&self) -> &str {
+        let s = self.script.trim();
+        if !s.is_empty() {
+            s
+        } else if let Some(cmd) = &self.command {
+            cmd.trim()
+        } else {
+            ""
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -236,6 +257,77 @@ fn read_toml_environment(project_path: &Path) -> Result<Option<TomlEnvironment>,
     let env: TomlEnvironment = toml::from_str(&text)
         .map_err(|e| format!("parse {}: {e}", toml_path.display()))?;
     Ok(Some(env))
+}
+
+/// Auto-detect a build command for a project repository if one isn't explicitly configured.
+/// Checks common package managers and build systems:
+/// - package.json with a "build" script (pnpm, yarn, bun, npm)
+/// - scripts/build.sh or build.sh
+/// - Cargo.toml -> cargo build
+/// - Makefile / GNUmakefile with a "build:" target -> make build
+/// - go.mod -> go build ./...
+pub fn detect_repo_build(project_path: &Path) -> Option<String> {
+    if !project_path.exists() {
+        return None;
+    }
+
+    // 1. package.json
+    let pkg_json = project_path.join("package.json");
+    if pkg_json.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if val.get("scripts").and_then(|s| s.get("build")).is_some() {
+                    if project_path.join("pnpm-lock.yaml").is_file() {
+                        return Some("pnpm run build".into());
+                    } else if project_path.join("yarn.lock").is_file() {
+                        return Some("yarn build".into());
+                    } else if project_path.join("bun.lockb").is_file() || project_path.join("bun.lock").is_file() {
+                        return Some("bun run build".into());
+                    } else {
+                        return Some("npm run build".into());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. scripts/build.sh or script/build.sh or build.sh
+    if project_path.join("scripts").join("build.sh").is_file() {
+        return Some("bash scripts/build.sh".into());
+    }
+    if project_path.join("script").join("build.sh").is_file() {
+        return Some("bash script/build.sh".into());
+    }
+    if project_path.join("build.sh").is_file() {
+        return Some("bash build.sh".into());
+    }
+
+    // 3. Cargo.toml
+    if project_path.join("Cargo.toml").is_file() {
+        return Some("cargo build".into());
+    }
+
+    // 4. Makefile / makefile / GNUmakefile
+    for mf_name in ["Makefile", "makefile", "GNUmakefile"] {
+        let mf = project_path.join(mf_name);
+        if mf.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&mf) {
+                for line in content.lines() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("build:") {
+                        return Some("make build".into());
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. go.mod
+    if project_path.join("go.mod").is_file() {
+        return Some("go build ./...".into());
+    }
+
+    None
 }
 
 // =============================================================================
@@ -319,6 +411,17 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
                 });
             }
         }
+        if let Some(build) = &project.build {
+            let cmd = build.command.trim();
+            if !cmd.is_empty() {
+                actions.push(ResolvedAction {
+                    name: "Build".into(),
+                    icon: Some("build".into()),
+                    command: cmd.into(),
+                    detached: false,
+                });
+            }
+        }
         for a in &project.actions {
             actions.push(ResolvedAction {
                 name: a.name.clone(),
@@ -327,17 +430,39 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
                 detached: a.detached,
             });
         }
+        if !actions.iter().any(|a| a.name.eq_ignore_ascii_case("build") || a.icon.as_deref() == Some("build")) {
+            if let Some(cmd) = detect_repo_build(&path) {
+                let pos = if actions.first().map(|a| a.name == "Setup").unwrap_or(false) { 1 } else { 0 };
+                actions.insert(pos, ResolvedAction {
+                    name: "Build".into(),
+                    icon: Some("build".into()),
+                    command: cmd,
+                    detached: false,
+                });
+            }
+        }
     } else {
         // ---- Auto: read TOML ---------------------------------------------
         match read_toml_environment(&path) {
             Ok(Some(toml_env)) => {
                 source = ProjectSource::Toml;
                 if let Some(setup) = &toml_env.setup {
-                    let cmd = setup.script.trim();
+                    let cmd = setup.command_str();
                     if !cmd.is_empty() {
                         actions.push(ResolvedAction {
                             name: "Setup".into(),
                             icon: Some("tool".into()),
+                            command: cmd.into(),
+                            detached: false,
+                        });
+                    }
+                }
+                if let Some(build) = &toml_env.build {
+                    let cmd = build.command_str();
+                    if !cmd.is_empty() {
+                        actions.push(ResolvedAction {
+                            name: "Build".into(),
+                            icon: Some("build".into()),
                             command: cmd.into(),
                             detached: false,
                         });
@@ -350,6 +475,17 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
                         command: a.command.clone(),
                         detached: a.detached,
                     });
+                }
+                if !actions.iter().any(|a| a.name.eq_ignore_ascii_case("build") || a.icon.as_deref() == Some("build")) {
+                    if let Some(cmd) = detect_repo_build(&path) {
+                        let pos = if actions.first().map(|a| a.name == "Setup").unwrap_or(false) { 1 } else { 0 };
+                        actions.insert(pos, ResolvedAction {
+                            name: "Build".into(),
+                            icon: Some("build".into()),
+                            command: cmd,
+                            detached: false,
+                        });
+                    }
                 }
                 let name = project
                     .name
@@ -373,6 +509,17 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
                     "no .codex/environments/environment.toml in {} — add one, or set manual: true with inline actions",
                     project.path
                 ));
+                if !actions.iter().any(|a| a.name.eq_ignore_ascii_case("build") || a.icon.as_deref() == Some("build")) {
+                    if let Some(cmd) = detect_repo_build(&path) {
+                        let pos = if actions.first().map(|a| a.name == "Setup").unwrap_or(false) { 1 } else { 0 };
+                        actions.insert(pos, ResolvedAction {
+                            name: "Build".into(),
+                            icon: Some("build".into()),
+                            command: cmd,
+                            detached: false,
+                        });
+                    }
+                }
             }
             Err(e) => {
                 warnings.push(format!("could not read TOML: {e}"));
@@ -730,6 +877,7 @@ mod tests {
             primary_action: None,
             manual: false,
             setup: None,
+            build: None,
             actions: vec![],
             env: Default::default(),
             auto_restart: None,
@@ -817,6 +965,7 @@ command = "echo stop"
             primary_action: None,
             manual: false,
             setup: None,
+            build: None,
             actions: vec![],
             env: Default::default(),
             auto_restart: None,
@@ -837,6 +986,54 @@ command = "echo stop"
     }
 
     #[test]
+    fn resolves_toml_environment_with_build() {
+        let tmp = std::env::temp_dir().join(format!("viberunner-test-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".codex/environments")).unwrap();
+        std::fs::write(
+            tmp.join(".codex/environments/environment.toml"),
+            r#"
+version = 1
+name = "Build Project"
+
+[setup]
+script = "echo setup"
+
+[build]
+script = "echo building"
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "echo run"
+"#,
+        )
+        .unwrap();
+
+        let project = ProjectConfig {
+            id: "build-test".into(),
+            path: tmp.to_string_lossy().into_owned(),
+            name: None,
+            primary_action: None,
+            manual: false,
+            setup: None,
+            build: None,
+            actions: vec![],
+            env: Default::default(),
+            auto_restart: None,
+        };
+        let resolved = resolve_project(&project);
+        assert_eq!(resolved.actions.len(), 3);
+        assert_eq!(resolved.actions[0].name, "Setup");
+        assert_eq!(resolved.actions[1].name, "Build");
+        assert_eq!(resolved.actions[1].command, "echo building");
+        assert_eq!(resolved.actions[1].icon.as_deref(), Some("build"));
+        assert_eq!(resolved.actions[2].name, "Run");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn resolves_manual_project() {
         let project = ProjectConfig {
             id: "static".into(),
@@ -847,6 +1044,7 @@ command = "echo stop"
             setup: Some(ManualCommand {
                 command: "echo setup".into(),
             }),
+            build: None,
             actions: vec![
                 ActionConfig {
                     name: "Run".into(),
@@ -875,6 +1073,69 @@ command = "echo stop"
     }
 
     #[test]
+    fn resolves_manual_project_with_build() {
+        let project = ProjectConfig {
+            id: "manual-build".into(),
+            path: "/tmp/manual-build".into(),
+            name: Some("Manual Build App".into()),
+            primary_action: None,
+            manual: true,
+            setup: Some(ManualCommand { command: "echo setup".into() }),
+            build: Some(ManualCommand { command: "npm run build".into() }),
+            actions: vec![
+                ActionConfig {
+                    name: "Run".into(),
+                    icon: Some("run".into()),
+                    command: "npm start".into(),
+                    detached: false,
+                },
+            ],
+            env: Default::default(),
+            auto_restart: None,
+        };
+        let resolved = resolve_project(&project);
+        assert_eq!(resolved.actions.len(), 3);
+        assert_eq!(resolved.actions[0].name, "Setup");
+        assert_eq!(resolved.actions[1].name, "Build");
+        assert_eq!(resolved.actions[1].command, "npm run build");
+        assert_eq!(resolved.actions[2].name, "Run");
+    }
+
+    #[test]
+    fn auto_detects_repo_build_package_json() {
+        let tmp = std::env::temp_dir().join(format!("viberunner-test-pkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("package.json"),
+            r#"{"name": "test", "scripts": {"build": "vite build"}}"#,
+        ).unwrap();
+
+        let cmd = detect_repo_build(&tmp);
+        assert_eq!(cmd.as_deref(), Some("npm run build"));
+
+        // With pnpm-lock.yaml
+        std::fs::write(tmp.join("pnpm-lock.yaml"), "").unwrap();
+        let cmd = detect_repo_build(&tmp);
+        assert_eq!(cmd.as_deref(), Some("pnpm run build"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn auto_detects_repo_build_cargo_toml() {
+        let tmp = std::env::temp_dir().join(format!("viberunner-test-cargo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"foo\"").unwrap();
+
+        let cmd = detect_repo_build(&tmp);
+        assert_eq!(cmd.as_deref(), Some("cargo build"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn missing_toml_yields_warning() {
         // Project points at a non-existent path.
         let project = ProjectConfig {
@@ -884,6 +1145,7 @@ command = "echo stop"
             primary_action: None,
             manual: false,
             setup: None,
+            build: None,
             actions: vec![],
             env: Default::default(),
             auto_restart: None,
@@ -902,6 +1164,7 @@ command = "echo stop"
             primary_action: Some("Stop".into()),
             manual: true,
             setup: None,
+            build: None,
             actions: vec![
                 ActionConfig {
                     name: "Run".into(),
@@ -933,6 +1196,7 @@ command = "echo stop"
             primary_action: None,
             manual: true,
             setup: None,
+            build: None,
             actions: vec![
                 ActionConfig {
                     name: "Run".into(),
@@ -986,6 +1250,7 @@ command = "echo stop"
             primary_action: None,
             manual: true,
             setup: None,
+            build: None,
             actions: vec![],
             env: env.clone(),
             auto_restart: None,
@@ -1008,6 +1273,7 @@ command = "echo stop"
             primary_action: None,
             manual: false,
             setup: None,
+            build: None,
             actions: vec![],
             env: Default::default(),
             auto_restart: None,

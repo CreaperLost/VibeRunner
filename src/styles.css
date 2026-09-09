@@ -569,6 +569,17 @@ code {
   border-color: var(--c-primary-hover);
 }
 
+.btn--warning {
+  background: var(--c-warning, #d97706);
+  color: #fff;
+  border-color: var(--c-warning, #d97706);
+}
+
+.btn--warning:hover:not(:disabled) {
+  background: #b45309;
+  border-color: #b45309;
+}
+
 .detail__config {
   display: flex;
   flex-direction: column;

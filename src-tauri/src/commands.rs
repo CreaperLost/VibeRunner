@@ -189,11 +189,12 @@ pub fn run_action(project_id: String, action_name: String, app: AppHandle) -> Re
         .clone();
 
     let handle = state.get_or_create(&project_id);
+    if action.name.eq_ignore_ascii_case("stop") || action.icon.as_deref() == Some("stop") {
+        stop_project_internal(&project_id, &app);
+        return Ok(());
+    }
+
     if handle.is_active() {
-        if action.name.eq_ignore_ascii_case("stop") || action.icon.as_deref() == Some("stop") {
-            stop_project_internal(&project_id, &app);
-            return Ok(());
-        }
         return Err(format!(
             "project '{project_id}' is already running — stop it first"
         ));
@@ -244,6 +245,38 @@ pub fn setup_project(project_id: String, app: AppHandle) -> Result<(), String> {
     handle.reset_restart_count();
     emit_status(&app, &project_id, Status::Starting, Some("Setup"), None);
     spawn_action(&app, &project, &setup, handle)
+}
+
+/// Run the project's "Build" action (if any). Returns Err
+/// if the project has no build action.
+#[tauri::command]
+pub fn build_project(project_id: String, app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let resolved = config::resolve_all(&state.config());
+    let project = resolved
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {project_id}"))?
+        .clone();
+    let build = project
+        .actions
+        .iter()
+        .find(|a| {
+            (a.name.eq_ignore_ascii_case("build") || a.icon.as_deref() == Some("build"))
+                && a.name != "Setup"
+        })
+        .cloned()
+        .ok_or_else(|| format!("project '{project_id}' has no build action"))?;
+
+    let handle = state.get_or_create(&project_id);
+    if handle.is_active() {
+        return Err(format!(
+            "project '{project_id}' is already running — stop it first"
+        ));
+    }
+    handle.reset_restart_count();
+    emit_status(&app, &project_id, Status::Starting, Some(&build.name), None);
+    spawn_action(&app, &project, &build, handle)
 }
 
 /// Stop the project's current PTY (keystroke → SIGTERM → SIGKILL).
@@ -662,7 +695,8 @@ fn stop_project_internal(project_id: &str, app: &AppHandle) {
         return;
     };
     handle.cancel_restart();
-    if !handle.is_active() {
+    let was_crashed = handle.status() == Status::Crashed;
+    if !handle.is_active() && !was_crashed {
         return;
     }
 
@@ -745,13 +779,39 @@ fn stop_project_internal(project_id: &str, app: &AppHandle) {
                 target_pids.push(p);
             }
         }
+        if ppath.is_dir() {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                sysinfo::ProcessRefreshKind::everything(),
+            );
+            let my_pid = std::process::id();
+            let path_str = ppath.to_string_lossy();
+            for (pid, proc) in sys.processes() {
+                let p_u32 = pid.as_u32();
+                if p_u32 == my_pid {
+                    continue;
+                }
+                let cwd_matches = proc.cwd().map(|c| c.starts_with(&ppath)).unwrap_or(false);
+                let cmd_matches = proc.cmd().iter().any(|arg| arg.to_string_lossy().contains(path_str.as_ref()));
+                if (cwd_matches || cmd_matches) && !target_pids.contains(&p_u32) {
+                    target_pids.push(p_u32);
+                }
+            }
+        }
     }
     if target_pids.is_empty() {
         if let Some(p) = handle.pid() {
             target_pids.push(p);
         }
     }
-    spawn_escalation(handle, gen, target_pids);
+
+    if was_crashed {
+        spawn_crashed_cleanup(handle, gen, target_pids, project_id.to_string(), app.clone());
+    } else {
+        spawn_escalation(handle, gen, target_pids);
+    }
 }
 
 /// Spawn a single action's command in a PTY and wire up the output /
@@ -1440,5 +1500,48 @@ fn spawn_escalation(handle: SharedRunner, gen: u64, target_pids: Vec<u32>) {
             return;
         }
         crate::process::kill_pids(&target_pids, true);
+    });
+}
+
+fn spawn_crashed_cleanup(
+    handle: SharedRunner,
+    gen: u64,
+    target_pids: Vec<u32>,
+    project_id: String,
+    app: AppHandle,
+) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(GRACE_AFTER_KEYSTROKE).await;
+        if handle.generation() != gen {
+            return;
+        }
+        crate::process::kill_pids(&target_pids, false);
+
+        tokio::time::sleep(GRACE_AFTER_SIGTERM).await;
+        if handle.generation() != gen {
+            return;
+        }
+        crate::process::kill_pids(&target_pids, true);
+
+        if handle.generation() == gen {
+            handle.clear_runtime();
+            handle.set_status(Status::Stopped);
+            let _ = app.emit(
+                EVT_STATUS,
+                StatusPayload {
+                    id: project_id.clone(),
+                    status: "stopped".into(),
+                    action: None,
+                    reason: None,
+                },
+            );
+            let _ = app.emit(
+                EVT_PORTS,
+                PortsPayload {
+                    id: project_id,
+                    ports: Vec::new(),
+                },
+            );
+        }
     });
 }
