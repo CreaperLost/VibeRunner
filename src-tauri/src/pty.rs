@@ -19,8 +19,10 @@
 //! without the user having to declare every key in VibeRunner.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, PtySize};
 
@@ -77,6 +79,58 @@ pub fn load_project_env(
     env
 }
 
+/// Environment overrides shared by PTY actions and standalone stop
+/// commands. macOS apps opened from Finder do not inherit the user's
+/// interactive shell PATH, so recover it once from the login shell.
+/// Values declared by the project still take precedence.
+pub fn command_env(
+    project_path: &Path,
+    project_env: &HashMap<String, String>,
+) -> HashMap<String, OsString> {
+    let mut env = HashMap::new();
+
+    if let Some(path) = login_shell_path() {
+        env.insert("PATH".to_string(), path);
+    }
+
+    for (key, value) in load_project_env(project_path, project_env) {
+        env.insert(key, value.into());
+    }
+
+    env
+}
+
+#[cfg(target_os = "macos")]
+fn login_shell_path() -> Option<OsString> {
+    static PATH: OnceLock<Option<OsString>> = OnceLock::new();
+
+    PATH.get_or_init(|| {
+        use std::process::{Command, Stdio};
+
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+        let output = Command::new(shell)
+            .args(["-ilc", "printf '__VIBERUNNER_PATH__%s' \"$PATH\""])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let path = stdout.rsplit_once("__VIBERUNNER_PATH__")?.1.trim();
+        (!path.is_empty()).then(|| OsString::from(path))
+    })
+    .clone()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn login_shell_path() -> Option<OsString> {
+    None
+}
+
 /// Spawn a command in a fresh PTY. The command is interpreted by a
 /// shell: `sh -c <cmd>` on Unix, `cmd /C <cmd>` on Windows.
 ///
@@ -109,7 +163,7 @@ pub fn spawn(
     let mut cmd = shell_command(command);
     cmd.cwd(project_path);
 
-    let full_env = load_project_env(project_path, project_env);
+    let full_env = command_env(project_path, project_env);
     for (k, v) in full_env {
         cmd.env(k, v);
     }
@@ -249,5 +303,16 @@ mod tests {
         assert_eq!(loaded.get("EXTRA").map(|s| s.as_str()), Some("extra_val"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_command_env_preserves_explicit_project_path() {
+        let project_path = std::env::temp_dir();
+        let mut project_env = HashMap::new();
+        project_env.insert("PATH".into(), "/project/bin".into());
+
+        let loaded = command_env(&project_path, &project_env);
+
+        assert_eq!(loaded.get("PATH"), Some(&OsString::from("/project/bin")));
     }
 }

@@ -1,0 +1,15 @@
+version = 1
+name = "VibeRunner"
+
+[setup]
+script = "pnpm install"
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "pnpm tauri dev"
+
+[[actions]]
+name = "Stop"
+icon = "stop"
+command = "Ctrl+C"

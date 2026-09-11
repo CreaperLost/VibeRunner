@@ -735,7 +735,7 @@ fn stop_project_internal(project_id: &str, app: &AppHandle) {
                 cmd_obj.arg("/C").arg(&stop_act.command);
 
                 cmd_obj.current_dir(&project_path);
-                let full_env = pty::load_project_env(&project_path, &proj.env);
+                let full_env = pty::command_env(&project_path, &proj.env);
                 for (k, v) in full_env {
                     cmd_obj.env(k, v);
                 }

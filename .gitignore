@@ -53,6 +53,12 @@ __pycache__/
 .venv/
 venv/
 
+# Codex local state (sessions, logs). Keep the shared environment file.
+.codex/*
+!.codex/environments/
+.codex/environments/*
+!.codex/environments/environment.toml
+
 # Editor directories and operating-system files
 .vscode/*
 !.vscode/extensions.json
