@@ -592,55 +592,6 @@ pub fn open_url(url: String) -> Result<(), String> {
 }
 
 // =============================================================================
-// updater (unchanged)
-// =============================================================================
-
-#[derive(Debug, Serialize)]
-pub struct UpdateInfo {
-    pub available: bool,
-    pub current_version: String,
-    pub latest_version: Option<String>,
-    pub notes: Option<String>,
-    pub error: Option<String>,
-}
-
-#[tauri::command]
-pub async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let current = app.package_info().version.to_string();
-
-    match app
-        .updater()
-        .map_err(|e| e.to_string())?
-        .check()
-        .await
-    {
-        Ok(Some(update)) => Ok(UpdateInfo {
-            available: true,
-            current_version: current,
-            latest_version: Some(update.version.to_string()),
-            notes: update.body.clone(),
-            error: None,
-        }),
-        Ok(None) => Ok(UpdateInfo {
-            available: false,
-            current_version: current,
-            latest_version: None,
-            notes: None,
-            error: None,
-        }),
-        Err(e) => Ok(UpdateInfo {
-            available: false,
-            current_version: current,
-            latest_version: None,
-            notes: None,
-            error: Some(e.to_string()),
-        }),
-    }
-}
-
-// =============================================================================
 // helpers
 // =============================================================================
 

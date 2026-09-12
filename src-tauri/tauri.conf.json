@@ -56,18 +56,5 @@
         }
       }
     }
-  },
-  "plugins": {
-    "updater": {
-      "active": true,
-      "dialog": false,
-      "endpoints": [
-        "https://github.com/georgepaterakis/viberunner/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBQUQ4OERGQTcwRkQ3MQpSV1J4L1hENmpkaXFBb2lVN1pUN1M2QnlyQlorWXdvOFFHSS9Bcnd3bDBHdkRCcnNIUW5WVDhkMAo=",
-      "windows": {
-        "installMode": "passive"
-      }
-    }
   }
 }

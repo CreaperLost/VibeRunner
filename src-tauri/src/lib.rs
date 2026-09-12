@@ -20,7 +20,6 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::new())
@@ -61,7 +60,6 @@ pub fn run() {
             commands::open_path,
             commands::open_url,
             commands::resize_pty,
-            commands::check_for_updates,
         ])
 
         .run(tauri::generate_context!())

@@ -237,11 +237,7 @@ Local builds are suitable for development and testing. Before publishing:
 - sign and notarize macOS artifacts;
 - sign Windows installers;
 - test Linux packages on the distributions you support; and
-- keep `src-tauri/.tauri-updater-key` and any signing certificates out of Git.
-
-The updater public key is stored in `src-tauri/tauri.conf.json`. The private
-updater key is intentionally ignored by Git and should be supplied to release
-automation through a secret such as `TAURI_SIGNING_PRIVATE_KEY`.
+- keep any signing certificates out of Git.
 
 ## Troubleshooting checklist
 

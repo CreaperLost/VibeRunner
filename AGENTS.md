@@ -84,7 +84,6 @@ VibeRunner/
 │   ├── icons/                  # generated from assets/icon-source.png
 │   ├── tauri.conf.json
 │   ├── Cargo.toml
-│   ├── .tauri-updater-key      # gitignored; private signing key
 │   └── .gitignore
 ├── package.json                # all build commands live here
 ├── AGENTS.md                   # this file
@@ -264,7 +263,7 @@ slower but catches issues that test:rust alone might miss.)
 
 ## Release setup (deferred)
 
-The updater plugin is wired but no CI workflow. To actually ship:
+No CI workflow yet. To actually ship:
 
 1. Get the Apple Developer Program ($99/yr) and/or a Windows EV cert
    (free for OSS via SignPath.io).
@@ -272,6 +271,3 @@ The updater plugin is wired but no CI workflow. To actually ship:
    builds for each target OS, signs the bundles, and publishes to a
    GitHub Release with `latest.json` next to it.
 3. Bump the version in `tauri.conf.json` per release.
-
-The private signing key lives at `src-tauri/.tauri-updater-key` (gitignored)
-or in `TAURI_SIGNING_PRIVATE_KEY` env var.

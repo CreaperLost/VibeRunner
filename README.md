@@ -79,7 +79,6 @@ This is a working, end-to-end build. What's in:
 - ✅ **Group actions** — Run all / Stop all in the header
 - ✅ **Open config in editor** — one click in the header
 - ✅ **JSONC support** — comments and trailing commas accepted on read
-- ✅ Tauri updater plugin wired (keypair generated, public key in config)
 - ✅ App icon (1024×1024 source + all platform sizes generated)
 - ✅ Bundle metadata (publisher, category, descriptions)
 
@@ -338,7 +337,6 @@ VibeRunner/
 | `stop_project` | Kill the current PTY (keystroke → SIGTERM → SIGKILL) |
 | `restart_project` | Stop → setup → primary action (sequential) |
 | `write_to_pty` | Pipe user keystrokes into the active PTY |
-| `check_for_updates` | Query the updater endpoint |
 
 ## Caveats
 
@@ -376,11 +374,6 @@ workflow that:
 1. Builds for each target OS
 2. Signs with the appropriate cert (from CI secrets)
 3. Publishes to a GitHub Release with `latest.json` next to it
-
-The updater plugin is already wired (keypair generated, public key
-in `tauri.conf.json`). The private key lives at
-`src-tauri/.tauri-updater-key` (gitignored) and gets exposed to CI
-via the `TAURI_SIGNING_PRIVATE_KEY` env var.
 
 If you want help with the CI workflow when you're ready, ask.
 
