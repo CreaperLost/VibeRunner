@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectStatus, ResolvedProject, VibeConfigReloadedPayload } from "../types";
 import { ProjectCard } from "./ProjectCard";
 import { ProjectForm } from "./ProjectForm";
+import { usePersistentState } from "../hooks/usePersistentState";
+
+type ViewMode = "detailed" | "compact";
 
 interface SidebarProps {
   projects: ResolvedProject[];
@@ -28,7 +31,12 @@ export function Sidebar({
 }: SidebarProps) {
   const [showForm, setShowForm] = useState(false);
   const [query, setQuery] = useState("");
+  const [viewMode, setViewMode] = usePersistentState<ViewMode>(
+    "viberunner.sidebar.viewMode",
+    "detailed"
+  );
   const searchRef = useRef<HTMLInputElement>(null);
+  const compact = viewMode === "compact";
 
   // Cmd/Ctrl+F focuses the search box. Esc clears it.
   useEffect(() => {
@@ -72,14 +80,42 @@ export function Sidebar({
             ? `${filtered.length} / ${projects.length}`
             : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
         </span>
-        <button
-          type="button"
-          className="btn btn--small"
-          onClick={() => setShowForm(true)}
-          title="Add a new project"
-        >
-          + New
-        </button>
+        <div className="sidebar__header-actions">
+          <div
+            className="view-toggle"
+            role="group"
+            aria-label="Project list view"
+          >
+            <button
+              type="button"
+              className={`view-toggle__btn${viewMode === "detailed" ? " view-toggle__btn--active" : ""}`}
+              onClick={() => setViewMode("detailed")}
+              aria-pressed={viewMode === "detailed"}
+              title="Detailed view — shows path, actions, source"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+              <span className="view-toggle__label">Detailed</span>
+            </button>
+            <button
+              type="button"
+              className={`view-toggle__btn${viewMode === "compact" ? " view-toggle__btn--active" : ""}`}
+              onClick={() => setViewMode("compact")}
+              aria-pressed={viewMode === "compact"}
+              title="Compact view — icon, name, and status only"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/></svg>
+              <span className="view-toggle__label">Compact</span>
+            </button>
+          </div>
+          <button
+            type="button"
+            className="btn btn--small"
+            onClick={() => setShowForm(true)}
+            title="Add a new project"
+          >
+            + New
+          </button>
+        </div>
       </div>
 
       <div className="sidebar__search">
@@ -105,7 +141,7 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="sidebar__list">
+      <div className={`sidebar__list${compact ? " sidebar__list--compact" : ""}`}>
         {projects.length === 0 ? (
           <div className="sidebar__empty">
             <p>No projects yet.</p>
@@ -129,6 +165,7 @@ export function Sidebar({
               currentAction={currentActions.get(p.id) ?? null}
               ports={ports.get(p.id) ?? []}
               selected={p.id === selectedId}
+              compact={compact}
               onSelect={() => onSelect(p.id)}
               onConfigReloaded={onConfigReloaded}
               onRemoveProject={onRemoveProject}

@@ -5,6 +5,11 @@ name = "VibeRunner"
 script = "pnpm install"
 
 [[actions]]
+name = "Build .app"
+icon = "build"
+command = "bash scripts/build-app.sh"
+
+[[actions]]
 name = "Run"
 icon = "run"
 command = "pnpm tauri dev"

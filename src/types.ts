@@ -141,3 +141,27 @@ export interface VibeConfigReloadedPayload {
   projects: ResolvedProject[];
   path: string;
 }
+
+// =============================================================================
+// Auto-discovered build artifacts (mirrors src-tauri/src/artifacts.rs)
+// =============================================================================
+
+/** What kind of button the artifact powers. */
+export type ArtifactKind = "install" | "portable";
+
+/** A single discovered installable / portable artifact. */
+export interface ProjectArtifact {
+  kind: ArtifactKind;
+  path: string;
+  displayName: string;
+  /** Parent directory — for UI hints like "in target/release/bundle/macos". */
+  parent: string;
+  sizeBytes: number;
+  modifiedMs: number;
+}
+
+/** Top-ranked Install + Portable for a project (either may be null). */
+export interface ArtifactsScan {
+  install: ProjectArtifact | null;
+  portable: ProjectArtifact | null;
+}

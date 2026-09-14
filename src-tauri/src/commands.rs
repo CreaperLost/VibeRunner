@@ -19,6 +19,7 @@ use crate::events::{
     EVT_CONFIG_RELOADED, EVT_OUTPUT, EVT_PORTS, EVT_RESTARTING, EVT_STATUS, OutputPayload,
     PortsPayload, RestartingPayload, StatusPayload, VibeConfigReloadedPayload,
 };
+use crate::artifacts;
 use crate::ports;
 use crate::process::{parse_keystrokes, GRACE_AFTER_KEYSTROKE, GRACE_AFTER_SIGTERM};
 use crate::pty;
@@ -1495,4 +1496,31 @@ fn spawn_crashed_cleanup(
             );
         }
     });
+}
+
+// =============================================================================
+// artifact scanning
+// =============================================================================
+
+/// Scan a project folder for installable / portable build artifacts
+/// (`.dmg` / `.app` / `.exe` / `.deb` / …) — see `artifacts.rs` for
+/// the OS filter and ranking rules.
+///
+/// Returns at most one `install` and one `portable`. The frontend
+/// uses these to surface "Install" and "Run Portable" buttons next
+/// to the configured TOML actions.
+///
+/// Blocking, but cheap: a depth-capped recursive walk that skips
+/// `node_modules`, `.git`, etc. Safe to call from the Tauri command
+/// thread.
+#[tauri::command]
+pub fn scan_project_artifacts(path: String) -> Result<artifacts::ArtifactsScan, String> {
+    let path = std::path::PathBuf::from(&path);
+    if !path.exists() {
+        return Err(format!("path does not exist: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("path is not a directory: {}", path.display()));
+    }
+    Ok(artifacts::scan_project_artifacts(&path))
 }

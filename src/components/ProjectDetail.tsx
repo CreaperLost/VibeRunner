@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ArtifactsScan,
+  ProjectArtifact,
   ProjectStatus,
   ResolvedAction,
   ResolvedProject,
+  VibeConfigReloadedPayload,
 } from "../types";
 import { StatusPill } from "./StatusPill";
 import { LogViewer, type LogViewerHandle } from "./LogViewer";
 import { PortList } from "./PortList";
 import { useProjectRestarting } from "../hooks/useRunnerEvents";
-import { openBrowserUrl } from "../utils";
+import { openBrowserUrl, openLocalPath } from "../utils";
 
 interface ProjectDetailProps {
   project: ResolvedProject | null;
@@ -126,6 +131,88 @@ export function ProjectDetail({
   const [isScrolledUp, setIsScrolledUp] = useState(false);
   const logActionsRef = useRef<LogViewerHandle | null>(null);
 
+  // Auto-discovered build artifacts (.dmg, .app, .exe, ...). Scanned
+  // on mount + whenever the project path changes or the user clicks
+  // Refresh. Used to surface "Install" and "Run Portable" buttons
+  // alongside the TOML-defined actions.
+  const [scan, setScan] = useState<ArtifactsScan | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const scanSeqRef = useRef(0);
+
+  const runScan = async (path: string) => {
+    const seq = ++scanSeqRef.current;
+    setScanning(true);
+    setScanError(null);
+    try {
+      const result = await invoke<ArtifactsScan>("scan_project_artifacts", { path });
+      if (seq !== scanSeqRef.current) return; // a newer scan superseded us
+      setScan(result);
+    } catch (e) {
+      if (seq !== scanSeqRef.current) return;
+      setScanError(typeof e === "string" ? e : String(e));
+      setScan(null);
+    } finally {
+      if (seq === scanSeqRef.current) setScanning(false);
+    }
+  };
+
+  // Scan whenever the selected project (path) changes. This is also
+  // the "refresh on select" behavior; the user can force a fresh
+  // scan via the Refresh button after a Build completes.
+  useEffect(() => {
+    if (project) runScan(project.path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.path]);
+
+  // After a build, re-scan so a freshly produced .app / .dmg shows
+  // up without a manual refresh. We detect "build finished" by
+  // watching `pending`: it flips true → false around a build.
+  const prevPendingRef = useRef(pending);
+  useEffect(() => {
+    if (prevPendingRef.current && !pending && project) {
+      runScan(project.path);
+    }
+    prevPendingRef.current = pending;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending]);
+
+  // Re-scan whenever the global config is reloaded. Covers:
+  //   - the header "↻ Reload" button (calls reload_config in App.tsx,
+  //     which emits config:reloaded),
+  //   - the file-watcher auto-reload on edits to vibe.config.json,
+  //   - any add/remove project operation.
+  // Subscribed once with a ref so the listener survives project
+  // changes without re-subscribing.
+  const projectForReloadRef = useRef(project);
+  useEffect(() => {
+    projectForReloadRef.current = project;
+  }, [project]);
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let cancelled = false;
+    (async () => {
+      const u = await listen<VibeConfigReloadedPayload>(
+        "config:reloaded",
+        () => {
+          if (cancelled) return;
+          const cur = projectForReloadRef.current;
+          if (cur) runScan(cur.path);
+        }
+      );
+      if (cancelled) {
+        u();
+        return;
+      }
+      unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleCopyLogs = async () => {
     if (logActionsRef.current) {
       const ok = await logActionsRef.current.copyLogs();
@@ -188,6 +275,21 @@ export function ProjectDetail({
           ))}
         </div>
       )}
+
+      <ArtifactsSection
+        scan={scan}
+        scanning={scanning}
+        scanError={scanError}
+        onRefresh={() => runScan(project.path)}
+        openArtifact={async (artifact) => {
+          // Use openLocalPath → backend open_path command, which
+          // dispatches to the OS default handler (macOS `open`,
+          // Windows ShellExecute, Linux xdg-open). For .dmg this
+          // mounts + opens Finder; for .app it launches the bundle;
+          // for .exe / .AppImage it runs them.
+          await openLocalPath(artifact.path);
+        }}
+      />
 
       <div className="detail__actions">
         {setupAction && (
@@ -493,5 +595,123 @@ function RestartBanner({ projectId }: { projectId: string }) {
       Crashed — auto-restarting in {(info.delayMs / 1000).toFixed(1)}s
       (attempt {info.attempt}/{info.max})…
     </div>
+  );
+}
+
+/**
+ * Auto-discovered build artifacts section.
+ *
+ * Shows an "Install" button when an installable artifact is found
+ * (`.dmg` on mac, `.msi` on Windows, `.deb` / `.rpm` on Linux) and a
+ * "Run Portable" button when a portable one is (`.app`, `.exe`,
+ * `.AppImage`). Hides entirely when neither is found so it doesn't
+ * add visual noise to projects without builds.
+ *
+ * The Refresh button re-runs the scan. The parent already auto-scans
+ * on selection + after a build completes; this is for manual
+ * recovery (e.g., user ran a build outside of VibeRunner).
+ */
+function ArtifactsSection({
+  scan,
+  scanning,
+  scanError,
+  onRefresh,
+  openArtifact,
+}: {
+  scan: ArtifactsScan | null;
+  scanning: boolean;
+  scanError: string | null;
+  onRefresh: () => void;
+  openArtifact: (artifact: ProjectArtifact) => Promise<void>;
+}) {
+  const hasAny = !!(scan?.install || scan?.portable);
+  // While the very first scan is in flight, render nothing — we
+  // don't want a flash of "no artifacts found" before the scan
+  // completes. After the first scan completes, render even if empty
+  // so the Refresh button is reachable.
+  if (scanning && !scan && !scanError) return null;
+
+  return (
+    <section className="detail__artifacts">
+      <header className="detail__artifacts-header">
+        <div className="detail__artifacts-title">
+          <span className="detail__artifacts-label">Discovered artifacts</span>
+          <span className="detail__artifacts-hint">
+            auto-scanned from the project folder
+          </span>
+        </div>
+        <button
+          type="button"
+          className="btn btn--tiny"
+          onClick={onRefresh}
+          disabled={scanning}
+          title="Re-parse the project folder and rescan for build artifacts"
+          aria-label="Refresh artifacts"
+        >
+          {scanning ? "…" : "↻ Refresh"}
+        </button>
+      </header>
+      <div className="detail__artifacts-body">
+        {scanError && (
+          <div className="detail__artifacts-error" role="alert">
+            ⚠ {scanError}
+          </div>
+        )}
+        {!scanError && !hasAny && (
+          <div className="detail__artifacts-empty">
+            No installable or portable artifacts found. Run{" "}
+            <code>Build .app</code> / <code>Build .dmg</code> first, or
+            drop a built artifact in the project folder.
+          </div>
+        )}
+        {scan?.install && (
+          <ArtifactButton
+            artifact={scan.install}
+            label="Install"
+            onClick={() => openArtifact(scan.install!)}
+          />
+        )}
+        {scan?.portable && (
+          <ArtifactButton
+            artifact={scan.portable}
+            label="Run Portable"
+            onClick={() => openArtifact(scan.portable!)}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ArtifactButton({
+  artifact,
+  label,
+  onClick,
+}: {
+  artifact: ProjectArtifact;
+  label: string;
+  onClick: () => void;
+}) {
+  const sizeMb = (artifact.sizeBytes / (1024 * 1024)).toFixed(1);
+  const mtime = new Date(artifact.modifiedMs);
+  const dateLabel = mtime.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+  return (
+    <button
+      type="button"
+      className="btn btn--accent detail__artifact-btn"
+      onClick={onClick}
+      title={`${artifact.path}\n${sizeMb} MB · ${dateLabel}`}
+    >
+      <span className="detail__artifact-label">{label}</span>
+      <span className="detail__artifact-name" title={artifact.displayName}>
+        {artifact.displayName}
+      </span>
+      <span className="detail__artifact-meta">
+        {sizeMb} MB · {dateLabel}
+      </span>
+    </button>
   );
 }

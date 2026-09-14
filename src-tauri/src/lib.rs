@@ -3,6 +3,7 @@
 //! Wires up plugins, registers commands, and hands off to Tauri's
 //! runtime.
 
+mod artifacts;
 mod commands;
 mod config;
 mod events;
@@ -60,6 +61,7 @@ pub fn run() {
             commands::open_path,
             commands::open_url,
             commands::resize_pty,
+            commands::scan_project_artifacts,
         ])
 
         .run(tauri::generate_context!())
