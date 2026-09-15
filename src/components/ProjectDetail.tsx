@@ -480,7 +480,7 @@ export function ProjectDetail({
         />
       </section>
 
-      <section className="detail__panel">
+      <section id="ports-panel" className="detail__panel">
         <header className="detail__panel-header">
           <h3>Ports</h3>
           <span className="detail__panel-hint">
@@ -555,9 +555,16 @@ function OpenSiteBar({
         🌐 Open site · localhost:{primary}
       </button>
       {extra > 0 && (
-        <span className="detail__open-site-extras">
-          +{extra} other port{extra === 1 ? "" : "s"} (see below)
-        </span>
+        <button
+          type="button"
+          className="detail__open-site-extras detail__open-site-extras-btn"
+          onClick={() => {
+            document.getElementById("ports-panel")?.scrollIntoView({ behavior: "smooth" });
+          }}
+          title="Scroll down to ports list"
+        >
+          +{extra} other port{extra === 1 ? "" : "s"} (see below ↓)
+        </button>
       )}
     </div>
   );

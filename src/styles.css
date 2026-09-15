@@ -148,21 +148,64 @@ code {
 
 .app__body {
   display: flex;
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.app__body--resizing {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.app__body--resizing * {
+  user-select: none !important;
+  cursor: col-resize !important;
+}
+
+/* ---- Sidebar resizer splitter ---- */
+
+.app__splitter {
+  width: 6px;
+  margin-left: -3px;
+  margin-right: -3px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease;
+}
+
+.app__splitter:hover,
+.app__splitter--dragging {
+  background-color: var(--c-secondary, #2a9d8f);
 }
 
 /* ---- Sidebar ---- */
 
 .sidebar {
-  width: 320px;
+  width: 340px;
+  min-width: 240px;
+  max-width: 650px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   background: var(--c-sidebar);
   border-right: 1px solid var(--c-border);
-  overflow-y: auto;
+  overflow: hidden;
+  container-type: inline-size;
+  container-name: sidebar;
+  position: relative;
 }
 
 .sidebar__list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -452,13 +495,58 @@ code {
 /* ---- RunnerDetail ---- */
 
 .detail {
-  flex: 1;
+  flex: 1 1 0%;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px 28px;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  box-sizing: border-box;
+}
+
+.detail > * {
+  flex-shrink: 0;
+}
+
+.detail::-webkit-scrollbar {
+  width: 10px;
+}
+
+.detail::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: var(--radius-sm);
+}
+
+.detail::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 5px;
+  border: 2px solid #ffffff;
+}
+
+.detail::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.sidebar__list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar__list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar__list::-webkit-scrollbar-thumb {
+  background: var(--c-border-strong);
+  border-radius: 3px;
+}
+
+.sidebar__list::-webkit-scrollbar-thumb:hover {
+  background: var(--c-text-muted);
 }
 
 .detail--empty {
@@ -841,7 +929,6 @@ code {
 .log-viewer .xterm-viewport {
   background-color: #0f172a !important;
   overflow-y: scroll !important;
-  overscroll-behavior-y: contain;
 }
 
 /* Custom visible, draggable scrollbar for xterm */
@@ -1018,6 +1105,7 @@ code {
   padding: 10px 12px 8px;
   border-bottom: 1px solid var(--c-border);
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .sidebar__count {
@@ -1026,7 +1114,7 @@ code {
   letter-spacing: 0.05em;
   color: var(--c-text-muted);
   font-weight: 600;
-  flex-shrink: 0;
+  flex-shrink: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1040,6 +1128,12 @@ code {
   flex-shrink: 0;
 }
 
+.sidebar__new-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
 .view-toggle {
   display: inline-flex;
   align-items: center;
@@ -1048,6 +1142,7 @@ code {
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   gap: 2px;
+  flex-shrink: 0;
 }
 
 .view-toggle__btn {
@@ -1082,13 +1177,31 @@ code {
   /* Hide on very narrow widths; icons + tooltip still convey the state. */
 }
 
-@media (max-width: 380px) {
+@container sidebar (max-width: 350px) {
   .view-toggle__label {
     display: none;
   }
   .view-toggle__btn {
     padding: 4px 6px;
   }
+}
+
+.detail__open-site-extras-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--c-secondary, #2a9d8f);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.12s;
+}
+
+.detail__open-site-extras-btn:hover {
+  color: #1d7268;
 }
 
 .sidebar__search {

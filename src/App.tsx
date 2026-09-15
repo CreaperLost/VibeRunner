@@ -22,6 +22,7 @@ import {
   useProjectPorts,
   useProjectStatuses,
 } from "./hooks/useRunnerEvents";
+import { usePersistentState } from "./hooks/usePersistentState";
 import "./styles.css";
 
 function App() {
@@ -36,6 +37,43 @@ function App() {
   const statuses = useProjectStatuses();
   const currentActions = useCurrentActions();
   const ports = useProjectPorts();
+
+  const [sidebarWidth, setSidebarWidth] = usePersistentState<number>(
+    "viberunner.sidebar.width",
+    340
+  );
+  const [isResizing, setIsResizing] = useState(false);
+
+  const startResizing = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  const resetSidebarWidth = useCallback(() => {
+    setSidebarWidth(340);
+  }, [setSidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const minW = 260;
+      const maxW = Math.max(minW, Math.min(650, window.innerWidth - 360));
+      const nextW = Math.max(minW, Math.min(e.clientX, maxW));
+      setSidebarWidth(nextW);
+    };
+
+    const onMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [isResizing, setSidebarWidth]);
 
   /** Apply a freshly-loaded config + resolved projects; fix selection
    *  if the previously selected project no longer exists. */
@@ -351,7 +389,7 @@ function App() {
         </div>
       )}
 
-      <div className="app__body">
+      <div className={`app__body${isResizing ? " app__body--resizing" : ""}`}>
         <Sidebar
           projects={projects}
           statuses={statuses}
@@ -373,6 +411,16 @@ function App() {
             });
           }}
           onError={setError}
+          width={sidebarWidth}
+        />
+        <div
+          className={`app__splitter${isResizing ? " app__splitter--dragging" : ""}`}
+          onMouseDown={startResizing}
+          onDoubleClick={resetSidebarWidth}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize projects sidebar"
+          title="Drag to resize projects sidebar · Double-click to reset"
         />
         <ProjectDetail
           project={selectedProject}

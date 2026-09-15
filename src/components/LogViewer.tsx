@@ -118,19 +118,63 @@ export function LogViewer({
     // Track user scrolling: if user manually scrolls away from the bottom, pause auto-scroll
     const scrollSub = term.onScroll(() => {
       const buffer = term.buffer.active;
-      const atBottom = buffer.viewportY >= buffer.baseY - 1;
+      const atBottom = buffer.viewportY >= buffer.baseY;
       if (atBottom && userScrolledUp) {
         userScrolledUp = false;
         onScrolledUpChange?.(false);
+        term.scrollToBottom();
       } else if (!atBottom && !userScrolledUp) {
         userScrolledUp = true;
         onScrolledUpChange?.(true);
       }
     });
 
+    // Handle mouse wheel scrolling:
+    // When logs are at the bottom and user scrolls down, or at the top and user scrolls up,
+    // forward the scroll to the parent detail window (.detail) so ports and header can be reached.
+    term.attachCustomWheelEventHandler((ev: WheelEvent) => {
+      if (Math.abs(ev.deltaY) < Math.abs(ev.deltaX)) {
+        return true;
+      }
+
+      const buffer = term.buffer.active;
+      const isAtBottom = buffer.viewportY >= buffer.baseY;
+      const isAtTop = buffer.viewportY <= 0;
+
+      if (ev.deltaY > 0 && isAtBottom) {
+        const detail = container.closest(".detail");
+        if (detail) {
+          detail.scrollTop += ev.deltaY;
+        }
+        ev.preventDefault();
+        return false;
+      }
+
+      if (ev.deltaY < 0 && isAtTop) {
+        const detail = container.closest(".detail");
+        if (detail) {
+          detail.scrollTop += ev.deltaY;
+        }
+        ev.preventDefault();
+        return false;
+      }
+
+      return true;
+    });
+
     const syncPty = () => {
       try {
         fit.fit();
+        // Exact pixel height sync: eliminates subpixel and fractional line remainder
+        // so xterm's scrollbar and viewport scroll truly to the very last line.
+        const core = (term as any)._core;
+        const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
+        if (cellHeight && cellHeight > 0 && term.rows > 0) {
+          const exactHeight = Math.round(term.rows * cellHeight);
+          if (exactHeight > 0 && container.style.height !== `${exactHeight}px`) {
+            container.style.height = `${exactHeight}px`;
+          }
+        }
         if (term.cols && term.rows) {
           invoke("resize_pty", {
             projectId,
@@ -138,12 +182,17 @@ export function LogViewer({
             cols: term.cols,
           }).catch(() => {});
         }
+        if (!userScrolledUp) {
+          term.scrollToBottom();
+        }
       } catch {
         // Container momentarily unmeasured during layout
       }
     };
 
     syncPty();
+    requestAnimationFrame(() => syncPty());
+    document.fonts?.ready?.then(() => syncPty());
 
     // Expose actions to parent
     onActionsReady?.({
@@ -153,6 +202,8 @@ export function LogViewer({
         term.scrollToBottom();
       },
       clear: () => {
+        userScrolledUp = false;
+        onScrolledUpChange?.(false);
         term.clear();
         logBuffers.delete(projectId);
       },
@@ -221,11 +272,12 @@ export function LogViewer({
     };
     subscribers.add(onOutput);
 
-    // Re-fit when container size changes
+    // Re-fit when container or parent panel size changes (e.g. sidebar resize, window resize)
+    const observeTarget = container.parentElement ?? container;
     const ro = new ResizeObserver(() => {
       syncPty();
     });
-    ro.observe(container);
+    ro.observe(observeTarget);
 
     return () => {
       subscribers.delete(onOutput);
@@ -237,7 +289,7 @@ export function LogViewer({
     };
   }, [projectId]);
 
-  // Re-fit and sync when expanded state toggles
+  // Re-fit and sync when expanded state toggles (after CSS transition completes)
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
@@ -245,7 +297,7 @@ export function LogViewer({
       } catch {
         // ignore
       }
-    }, 100);
+    }, 220);
     return () => clearTimeout(timer);
   }, [expanded]);
 

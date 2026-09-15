@@ -16,6 +16,7 @@ interface SidebarProps {
   onConfigReloaded: (payload: VibeConfigReloadedPayload) => void;
   onRemoveProject: (id: string) => void;
   onError?: (msg: string) => void;
+  width?: number;
 }
 
 export function Sidebar({
@@ -28,6 +29,7 @@ export function Sidebar({
   onConfigReloaded,
   onRemoveProject,
   onError,
+  width,
 }: SidebarProps) {
   const [showForm, setShowForm] = useState(false);
   const [query, setQuery] = useState("");
@@ -73,7 +75,10 @@ export function Sidebar({
   }, [projects, query]);
 
   return (
-    <aside className="sidebar">
+    <aside
+      className="sidebar"
+      style={width ? { width: `${width}px` } : undefined}
+    >
       <div className="sidebar__header">
         <span className="sidebar__count">
           {query
@@ -109,7 +114,7 @@ export function Sidebar({
           </div>
           <button
             type="button"
-            className="btn btn--small"
+            className="btn btn--small sidebar__new-btn"
             onClick={() => setShowForm(true)}
             title="Add a new project"
           >
