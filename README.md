@@ -258,12 +258,16 @@ troubleshooting, see [BUILDING.md](BUILDING.md).
 ```bash
 pnpm build:mac              # on macOS  → src-tauri/target/release/bundle/dmg/*.dmg
 pnpm build:mac:universal    # macOS    → universal .dmg (x86_64 + arm64)
-pnpm build:win              # on Win    → src-tauri/target/release/bundle/msi/*.msi
+pnpm build:win              # on Win    → NSIS setup .exe + .msi installer
 pnpm build:linux            # on Linux  → .deb / .AppImage / .rpm
 pnpm build:debug            # unoptimized, faster, useful for testing the pipeline
 ```
 
-The produced bundle lives under `src-tauri/target/release/bundle/`.
+The produced bundle lives under `src-tauri/target/release/bundle/`. On
+Windows, use the NSIS file in `bundle/nsis/` as the normal distributable
+installer; an MSI is also written to `bundle/msi/`. See the
+[step-by-step Windows instructions](BUILDING.md#windows) for prerequisites,
+exact output paths, testing, and signing notes.
 
 **Cross-compilation note:** Building Windows `.msi` from macOS works
 for simple projects but Tauri uses platform-specific tools that

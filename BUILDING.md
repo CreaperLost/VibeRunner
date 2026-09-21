@@ -176,6 +176,10 @@ and [DMG guide](https://tauri.app/distribute/dmg/).
 
 ## Windows
 
+This section is the complete process for turning the repository into a
+Windows executable. Run it on a 64-bit Windows machine; building on the target
+operating system is the most reliable option.
+
 ### Native dependencies
 
 Install the following before running a Tauri build:
@@ -199,25 +203,73 @@ some Windows configurations.
 
 ### Build
 
-From PowerShell:
+Open PowerShell in the repository root (the folder containing `package.json`).
+Install the dependencies and confirm the toolchains are visible:
 
 ```powershell
 pnpm install --frozen-lockfile
+pnpm tauri:info
+```
+
+Optionally run the checks before producing a release:
+
+```powershell
+pnpm test
+```
+
+Build the optimized application and its Windows installers:
+
+```powershell
 pnpm build:win
 ```
 
-Find the generated installers under:
+The first build downloads and compiles the Rust dependencies and can take
+several minutes. Later builds reuse Cargo's cache and are normally much
+faster. A successful build prints the paths to the generated bundles.
+
+### Build outputs
+
+The command produces three useful files:
+
+| Artifact | Path | Use |
+|---|---|---|
+| NSIS installer executable | `src-tauri\target\release\bundle\nsis\VibeRunner_<version>_x64-setup.exe` | Recommended file to give to most Windows users |
+| MSI installer | `src-tauri\target\release\bundle\msi\VibeRunner_<version>_x64_en-US.msi` | Useful for managed or enterprise installation |
+| Raw application executable | `src-tauri\target\release\viberunner.exe` | Direct launch and local testing; not a complete installer |
+
+For the current `0.1.0` version, the installer names are:
 
 ```text
-src-tauri\target\release\bundle\msi\
-src-tauri\target\release\bundle\nsis\
+src-tauri\target\release\bundle\nsis\VibeRunner_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\msi\VibeRunner_0.1.0_x64_en-US.msi
 ```
+
+The version comes from `src-tauri\tauri.conf.json`. Update it before making a
+new release. The bundle target is configured as `"all"`, so Tauri creates both
+the NSIS `.exe` and MSI installer.
+
+Install and launch the NSIS or MSI package on a clean Windows account or test
+machine before distributing it. The target machine needs the Microsoft Edge
+WebView2 Runtime; current Windows releases generally already include it.
 
 The Windows build is unsigned by default, so SmartScreen may show an
 unknown-publisher warning. For public distribution, configure Windows code
 signing; see the official
 [Tauri Windows installer](https://tauri.app/distribute/windows-installer/)
 and [code-signing](https://tauri.app/distribute/sign/windows/) guides.
+
+### Rebuilding
+
+For a normal rebuild, run `pnpm build:win` again. If stale generated files are
+suspected, remove only the generated build output and rebuild:
+
+```powershell
+pnpm clean:all
+pnpm build:win
+```
+
+`pnpm clean:all` removes compiled artifacts, so the following Rust build will
+take longer. It does not remove application source files.
 
 ## Cross-compilation
 
