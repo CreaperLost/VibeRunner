@@ -9,6 +9,10 @@
   Windows · macOS · Linux
 </p>
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="VibeRunner showing five projects, one running with live logs, its localhost port, and Install / Run buttons for its latest build" width="100%" />
+</p>
+
 ---
 
 You have a handful of projects, and each one starts differently:

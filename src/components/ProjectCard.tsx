@@ -154,9 +154,12 @@ export function ProjectCard({
             </span>
           ))}
           <span className="chip">{project.source === "toml" ? "TOML" : project.source === "manual" ? "Manual" : "Empty"}</span>
-          <span className="chip chip--muted">
-            {project.actions.length} action{project.actions.length === 1 ? "" : "s"}
-          </span>
+          {/* Ports matter more while running; the count would just get clipped. */}
+          {runtime.ports.length < 2 && (
+            <span className="chip chip--muted">
+              {project.actions.length} action{project.actions.length === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
         <div className="card__actions">
           <button type="button" className="icon-btn icon-btn--sm" onClick={open(project.path)} title="Open folder">
