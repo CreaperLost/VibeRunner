@@ -1,422 +1,432 @@
-# VibeRunner
+<p align="center">
+  <img src="assets/icon-source.png" width="96" alt="VibeRunner icon" />
+</p>
 
-> A cross-platform runner manager for your dev apps — start, stop, restart, and watch logs from one window.
+<h1 align="center">VibeRunner</h1>
 
-VibeRunner reads a `vibe.config.json` (a list of project folders) and
-turns each project into a set of buttons: **Setup / Start / Stop /
-Restart** plus whatever custom actions the project declares. If a
-project ships a `.codex/environments/environment.toml` (the same
-convention used by [codex](https://github.com/openai/codex)), the
-actions are auto-discovered. Otherwise you can write the commands
-manually.
+<p align="center">
+  Start, stop and watch all your dev apps from one window.<br/>
+  Windows · macOS · Linux
+</p>
 
-Targets **Linux**, **macOS**, and **Windows** with a single codebase
-(Tauri 2 + React + TypeScript + Rust).
+---
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ ▶ VibeRunner    [▶ Run all] [■ Stop all]  ./vibe.config.json  ↻ ↗ ↓│
-├──────────────┬───────────────────────────────────────────────┤
-│ AssetFlow AI │ AssetFlow AI                                  │
-│ ● Stopped    │ id: assetflow · auto (TOML)                   │
-│ Run · Stop   │                                               │
-│ ~/AssetFlow… │ [🔧 Setup] [▶ Run] [■ Stop] [↻ Restart]       │
-│              │                                               │
-│ X-Automation │ Path    /Users/.../AssetFlow-AI               │
-│ ● Stopped    │                                               │
-│ Run · Stop   │ Actions                                       │
-│ ~/AXM…       │   Run   ./script/build_and_run.sh             │
-│              │   Stop  ./script/build_and_run.sh stop        │
-│              │                                               │
-│ Static (M)   │ ┌─ Logs ─────────────────────────────────────┐│
-│ ● Stopped    │ │ live PTY output streams here               ││
-│ Run · Stop   │ └─────────────────────────────────────────────┘│
-│              │                                               │
-│              │ ┌─ Ports ────────────────────────────────────┐│
-│              │ │ open ports listed here, click to open      ││
-│              │ └─────────────────────────────────────────────┘│
-└──────────────┴───────────────────────────────────────────────┘
-```
+You have a handful of projects, and each one starts differently:
+`npm run dev`, `docker compose up`, a PowerShell script, a Python
+server. VibeRunner turns every project folder into a row of buttons
+(**Run**, **Stop**, **Restart**, **Build**, plus anything else you
+define) and gives each one a live terminal, its open ports, and a
+one-click "open in browser".
 
-## Status
+- **One-click run / stop / restart** for every project, with a real
+  terminal you can type into
+- **Stop that actually stops**: the whole process tree is shut down,
+  so no orphaned `node` holding port 5173
+- **Detected ports** with clickable `localhost` links, and optional
+  auto-open in your browser when the app comes up
+- **Install / Run buttons** for your latest build outputs (`.exe`,
+  setup installer, `.msi`, `.dmg`, `.app`, `.AppImage`, `.deb`)
+- **Actions live in the repo** (`.codex/environments/environment.toml`),
+  so they're versioned with the code and an AI assistant can write
+  them for you
+- `.env` files are loaded automatically; crash notifications; optional
+  auto-restart; light and dark themes
 
-This is a working, end-to-end build. What's in:
+## Contents
 
-- ✅ **`vibe.config.json` v2** — list of project folders; JSONC
-  accepted on read
-- ✅ **Auto-discover from `.codex/environments/environment.toml`** —
-  any project that follows the codex convention gets its actions
-  picked up automatically (Run / Stop / Setup / etc.)
-- ✅ **Manual mode** — projects without a TOML can have their
-  setup / run / stop commands declared inline in `vibe.config.json`
-- ✅ **`.env` auto-load** — each project's `.env` is injected into
-  the spawned PTY's environment automatically
-- ✅ **Detached-process tracking** — mark an action as
-  `detached: true` and VibeRunner tracks the whole process tree
-  (e.g. for `nohup start.sh &` patterns), so the project stays
-  "Running" as long as any descendant is alive
-- ✅ **Native crash notifications** via `tauri-plugin-notification`
-- ✅ **Sidebar search** — ⌘F focuses a filter that searches by
-  name, id, path, or action
-- ✅ **Open in Finder / Open config** quick actions on each
-  project card
-- ✅ Sidebar of projects with status pill, action summary, source
-  badge (TOML / manual), warnings, and trash button
-- ✅ Detail panel: action buttons (one per TOML action + Stop +
-  built-in Restart), live PTY log (xterm.js), detected ports
-- ✅ **Restart** button = Stop → Setup → primary action, run
-  sequentially
-- ✅ Start / stop with real PTY; **process-tree kill** (npm-style
-  chains die together)
-- ✅ Stop escalation: keystroke → SIGTERM → SIGKILL; **Stopping**
-  status for instant feedback
-- ✅ Port detection via `lsof` (Unix) / `netstat` (Windows) for the
-  project's own process tree only, plus URLs the app prints;
-  clickable, optional one-time auto-open on Run
-- ✅ **Install / Run** buttons for the newest build outputs
-  (`.msi` / NSIS setup / `.exe`, `.dmg` / `.app`, `.deb` / `.AppImage`)
-- ✅ **Auto-restart on crash** with retry counter, delay, and a
-  transient banner
-- ✅ **In-app add/remove** projects (modal form with folder picker)
-- ✅ **Group actions** — Run all / Stop all in the header
-- ✅ **Open config in editor** — one click in the header
-- ✅ **JSONC support** — comments and trailing commas accepted on read
-- ✅ App icon (1024×1024 source + all platform sizes generated)
-- ✅ Bundle metadata (publisher, category, descriptions)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Give a repo its buttons](#give-a-repo-its-buttons)
+  - [Let your AI assistant write it](#let-your-ai-assistant-write-it)
+  - [Example configs](#example-configs)
+  - [Reference](#reference)
+- [Using VibeRunner](#using-viberunner)
+- [Troubleshooting](#troubleshooting)
+- [Build from source](#build-from-source)
 
-What's deferred (intentionally — the app is fully usable without them):
+## Install
 
-- **Signed/notarized releases** — costs $99/yr (Apple Developer
-  Program) + $0-400/yr (Windows cert). The structure is in place;
-  only the money-and-time part is missing. See
-  [Release setup](#release-setup) below.
-- **CI workflow** — same reason. The local `pnpm tauri build`
-  command produces a `.dmg` or `.msi` you can share directly; CI
-  is for publishing repeatable builds without you sitting at a Mac.
+Download the latest version from the
+[**Releases page**](https://github.com/CreaperLost/VibeRunner/releases/latest).
+
+| OS | File | Notes |
+|---|---|---|
+| **Windows 10/11** | `VibeRunner_x.y.z_x64-setup.exe` | Recommended. An `.msi` is also provided for managed installs. |
+| **macOS** | `VibeRunner_x.y.z_<arch>.dmg` | Open it and drag VibeRunner into Applications. |
+| **Linux** | `.AppImage`, `.deb` or `.rpm` | AppImage: `chmod +x VibeRunner*.AppImage` and run it. |
+
+The builds are **not code-signed yet**, so your OS will warn you the
+first time:
+
+- **Windows** (SmartScreen, "Windows protected your PC"): click
+  **More info → Run anyway**.
+- **macOS** ("cannot be opened because the developer cannot be
+  verified"): right-click the app in Applications → **Open** → **Open**.
+  If macOS says the app is damaged, run
+  `xattr -dr com.apple.quarantine /Applications/VibeRunner.app` once.
+
+Windows needs the Microsoft Edge **WebView2** runtime. It ships with
+Windows 10/11; the setup installer downloads it if it's missing.
 
 ## Quick start
 
-If you are setting up a development machine or building a release,
-see the platform-specific [build guide](BUILDING.md) first.
+1. Open VibeRunner and click **New** in the sidebar.
+2. Pick your project folder.
+   - If the folder has a `.codex/environments/environment.toml`, keep
+     **Auto-discover (TOML)** and its buttons appear immediately.
+   - If it doesn't, either choose **Manual (inline commands)** and type the commands in
+     the form, or [have your AI assistant create the file](#let-your-ai-assistant-write-it)
+     (recommended: it lives in the repo and works for everyone on the
+     team).
+3. Click the primary button (usually **Run**). Output streams into the
+   **Logs** tab, and once the app listens on a port, a
+   `localhost:PORT` button appears.
 
-```bash
-pnpm install
-pnpm tauri dev
+## Give a repo its buttons
+
+VibeRunner reads one file inside each project:
+
+```
+your-project/
+└── .codex/
+    └── environments/
+        └── environment.toml
 ```
 
-The app launches and reads `vibe.config.json` from the current
-working directory. A starter config is included — point each
-project at a folder on your disk, save the file, and hit
-**↻ Reload** (or let the file watcher pick it up automatically).
-
-If the folder you point at has a
-`.codex/environments/environment.toml` in it, VibeRunner reads the
-`[[actions]]` and `[setup]` from there. Otherwise you can declare
-the actions inline in `vibe.config.json` (the "static server"
-project in the sample demonstrates this).
-
-## Configuration
-
-`vibe.config.json` (v2 schema, JSONC accepted):
-
-```jsonc
-{
-  // VibeRunner v2: list of project folders.
-  "version": 2,
-  "projects": [
-    // Auto-discover: VibeRunner reads
-    //   <path>/.codex/environments/environment.toml
-    // and turns its `[[actions]]` + `[setup].script` into buttons.
-    {
-      "id": "assetflow",
-      "path": "/Users/you/projects/AssetFlow-AI"
-    },
-
-    // Manual: no TOML, you write the actions here.
-    {
-      "id": "static",
-      "name": "Static File Server",
-      "path": "/Users/you/projects/static",
-      "manual": true,
-      "setup": { "command": "" },
-      "actions": [
-        { "name": "Run",  "icon": "run",  "command": "python3 -m http.server 8080" },
-        { "name": "Stop", "icon": "stop", "command": "Ctrl+C" }
-      ]
-    }
-  ]
-}
-```
-
-### The TOML convention (auto-discover)
-
-If a project has `.codex/environments/environment.toml`, VibeRunner
-reads it and turns each `[[actions]]` entry into a button. Example
-(`AssetFlow-AI/.codex/environments/environment.toml`):
+It's the same convention [Codex](https://github.com/openai/codex) uses,
+so if your repo already has one, it just works. Every `[[actions]]`
+entry becomes a button:
 
 ```toml
-# THIS IS AUTOGENERATED. DO NOT EDIT MANUALLY
 version = 1
-name = "AssetFlow AI"
+name = "My App"
+
+[setup]                      # optional "Setup" button, also run by Restart
+script = "npm install"
+
+[[actions]]
+name = "Run"
+icon = "run"                 # "run" marks the primary action (Restart runs it)
+command = "npm run dev"
+
+[[actions]]
+name = "Test"
+icon = "test"
+command = "npm test"
+```
+
+Save the file and VibeRunner picks it up (or click the reload button in
+the header).
+
+### Let your AI assistant write it
+
+The fastest way to configure a repo is to ask the AI coding assistant
+you already use (Claude Code, Codex, Cursor, Copilot, …) to inspect it
+and write the file. Open the project in your assistant and paste this
+prompt:
+
+````text
+Create `.codex/environments/environment.toml` for this repository so the
+VibeRunner app can run it. First inspect the repo (package.json scripts,
+lockfiles, Makefile, docker-compose, pyproject/requirements, Cargo.toml,
+existing scripts/ folder, README) to learn how it is installed, run,
+built and tested. Don't guess commands that don't exist.
+
+Format:
+
+    version = 1
+    name = "<Project name>"
+
+    [setup]                  # optional: dependency install, run before Run on Restart
+    script = "<command>"
+
+    [[actions]]              # one block per button
+    name = "<Button label>"
+    icon = "run"             # run | stop | build | test | tool | migrate
+    command = "<shell command, run from the repo root>"
+    platform = "windows"     # optional: windows | unix | macos | linux
+    detached = false         # optional, see rule 4
+
+Rules:
+1. The main "start the app" action uses icon = "run". There must be
+   exactly one "run" action per OS. Add Build (icon "build") and Test
+   (icon "test") if the repo supports them; use "tool" or "migrate" for
+   other useful tasks (lint, db migrate, seed, package).
+2. Commands run through `cmd /C` on Windows and `sh -c` on macOS/Linux.
+   If a command differs per OS, write two actions with the same icon and
+   set platform = "windows" on one and platform = "unix" on the other.
+   Never leave two actions sharing an icon without platform set.
+3. For PowerShell scripts, use:
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\x.ps1"
+   with BACKSLASHES. `-File` rejects forward slashes.
+4. Run actions must stay in the foreground until the app exits (e.g.
+   `npm run dev`, `docker compose up`, not `docker compose up -d`), so
+   logs stream and Stop works. Only if a command must launch something
+   in the background and return immediately, set detached = true.
+5. Only add an icon = "stop" action if the app needs a special shutdown
+   (e.g. `docker compose down`). Without one, VibeRunner sends Ctrl+C
+   and then ends the whole process tree it started, which is right for
+   most dev servers.
+6. If the app serves a web UI, make sure it prints its URL
+   (http://localhost:PORT) on startup so VibeRunner can detect it.
+7. Use the repo's package manager (pnpm/yarn/bun/npm, based on the
+   lockfile) and existing scripts rather than inventing new ones.
+   If several services must run together (e.g. frontend + API), prefer
+   one Run action that starts them all (an existing "dev" script, or
+   docker compose); otherwise give each its own action.
+
+When done, show me the file and briefly explain each action.
+````
+
+Commit the file so everyone on the team (and every machine) gets the
+same buttons.
+
+### Example configs
+
+**Node / Vite app** (same commands on every OS):
+
+```toml
+version = 1
+name = "Storefront"
 
 [setup]
-script = ""
+script = "pnpm install"
 
 [[actions]]
 name = "Run"
 icon = "run"
-command = "./script/build_and_run.sh"
+command = "pnpm dev"
+
+[[actions]]
+name = "Build"
+icon = "build"
+command = "pnpm build"
+
+[[actions]]
+name = "Test"
+icon = "test"
+command = "pnpm test"
+```
+
+**Python API + frontend with Docker** (needs a real shutdown, so it has
+a Stop action):
+
+```toml
+version = 1
+name = "Thumbnail Studio"
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "docker compose up --build"
 
 [[actions]]
 name = "Stop"
 icon = "stop"
-command = "./script/build_and_run.sh stop"
+command = "docker compose down"
+
+[[actions]]
+name = "Migrate DB"
+icon = "migrate"
+command = "docker compose run --rm api alembic upgrade head"
 ```
 
-The `Setup` button is automatically prepended when `[setup].script`
-is set and non-empty.
-
-### Fields
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `version` | number | yes | Must be `2` |
-| `projects` | array | no | Empty array is fine |
-| `project.id` | string | yes | Unique within the file |
-| `project.path` | string | yes | Absolute path to the project folder |
-| `project.name` | string | no | Display name; defaults to TOML's `name` or `id` |
-| `project.primaryAction` | string | no | Action the built-in **Restart** runs. Defaults to first action with `name="Run"` or `icon="run"`. |
-| `project.manual` | boolean | no | Skip TOML discovery; use inline `actions` + `setup` |
-| `project.setup` | object | no | Inline `{ "command": "..." }` for manual projects |
-| `project.actions` | array | no | Inline `[{ name, icon?, command, platform? }]` for manual projects |
-| `project.env` | object | no | Extra env vars (manual projects) — overrides `.env` |
-| `project.autoRestart` | object | no | `{ enabled, maxRetries, delayMs }` (manual projects) |
-
-### TOML fields (auto-discovered)
-
-| Field | Type | Notes |
-|---|---|---|
-| `name` | string | Used as the project's display name |
-| `[setup].script` | string | The setup command; becomes a "Setup" button |
-| `[[actions]]` | array | Each entry becomes a button (Run / Stop / custom) |
-| `actions[].name` | string | Button label |
-| `actions[].icon` | string | Optional; one of `run`, `stop`, `tool`, `build`, `test`, `migrate` |
-| `actions[].command` | string | The shell command (runs through `sh -c` / `cmd /C`) |
-| `actions[].detached` | bool | If `true`, VibeRunner tracks the whole process tree (for `nohup start.sh &` patterns) |
-| `actions[].platform` | string | Optional; `windows`, `unix`, `macos`, `linux`, or `any`. Absent = available everywhere |
-
-### Cross-platform action sets
-
-A repo that needs a different command per OS declares a parallel set
-of actions and scopes each one with `platform`:
+**Cross-platform repo with its own scripts** (bash on macOS/Linux,
+PowerShell on Windows, so every action is scoped with `platform`):
 
 ```toml
+version = 1
+name = "Asset Flow"
+
+[setup]
+script = "npm ci"
+
 [[actions]]
 name = "Start"
 icon = "run"
 platform = "unix"
-command = "./script/build_and_run.sh"
+command = "./scripts/dev.sh"
 
 [[actions]]
 name = "Start (Windows)"
 icon = "run"
 platform = "windows"
-command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\script\run.ps1" run'
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\dev.ps1"'
+
+[[actions]]
+name = "Package"
+icon = "build"
+platform = "unix"
+command = "./scripts/package.sh"
+
+[[actions]]
+name = "Package (Windows)"
+icon = "build"
+platform = "windows"
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\package.ps1"'
 ```
 
-This matters because **Restart** and **Stop** pick an action by
-matching `icon` — the first match wins. If both sets share an `icon`
-and neither declares a `platform`, Windows silently resolves to the
-bash variant, which cannot run there. Scoping the actions fixes both
-buttons at once. Actions hidden by a `platform` mismatch are listed
-in the project's warnings, so a missing button is never silent.
+VibeRunner's own repo uses one as well: see
+[`.codex/environments/environment.toml`](.codex/environments/environment.toml).
 
-> **Windows gotcha:** `powershell.exe -File` rejects forward slashes
-> and fails with *"Illegal characters in path"*. Use `.\script\run.ps1`.
-> (`-Command "& './script/run.ps1'"` accepts forward slashes if you
-> prefer one cross-platform string.)
+### Reference
 
-### How `.env` is loaded
+**File:** `<project>/.codex/environments/environment.toml`
 
-When a project's PTY is spawned, VibeRunner reads
-`<project>/.env` (if present) and injects its `KEY=VALUE` pairs
-into the process's environment. The order of precedence is:
-
-1. Parent process env (lowest)
-2. `<project>/.env`
-3. `vibe.config.json` `project.env` (highest — overrides the above)
-
-This means your `.env.example` ships with the project and works
-out of the box, but you can override any key in `vibe.config.json`
-if you need to.
-
-### Resolution rules
-
-- **Where is the config loaded from?**
-  1. `$VIBE_CONFIG` env var (if set, points directly to a file)
-  2. Walk up from the current working directory looking for `vibe.config.json`
-  3. Walk up from the executable's directory
-- **Duplicate `id`** values are rejected at load time.
-- **Empty `path`** is rejected at load time.
-
-## Commands
-
-All commands live in `package.json`. Run with `pnpm <name>`.
-
-### Verify a clean checkout
-
-```bash
-pnpm install            # JS deps
-pnpm tauri:info         # toolchain + package versions
-pnpm typecheck          # tsc --noEmit
-pnpm test:rust          # cargo test --lib
-pnpm test               # typecheck + test:rust
-pnpm clean              # remove frontend dist/ and temp build files
-pnpm clean:all          # remove dist/, src-tauri/target/, and generated schemas
-pnpm verify             # test + tauri build --debug (slow, full pipeline)
-```
-
-### Develop
-
-```bash
-pnpm tauri dev          # vite + tauri dev, hot reload on both sides
-```
-
-### Build for distribution
-
-For native prerequisites, platform-specific packaging notes, and
-troubleshooting, see [BUILDING.md](BUILDING.md).
-
-`tauri build` does whatever the current platform produces:
-
-```bash
-pnpm build:mac              # on macOS  → src-tauri/target/release/bundle/dmg/*.dmg
-pnpm build:mac:universal    # macOS    → universal .dmg (x86_64 + arm64)
-pnpm build:win              # on Win    → NSIS setup .exe + .msi installer
-pnpm build:linux            # on Linux  → .deb / .AppImage / .rpm
-pnpm build:debug            # unoptimized, faster, useful for testing the pipeline
-```
-
-The produced bundle lives under `src-tauri/target/release/bundle/`. On
-Windows, use the NSIS file in `bundle/nsis/` as the normal distributable
-installer; an MSI is also written to `bundle/msi/`. See the
-[step-by-step Windows instructions](BUILDING.md#windows) for prerequisites,
-exact output paths, testing, and signing notes.
-
-**Cross-compilation note:** Building Windows `.msi` from macOS works
-for simple projects but Tauri uses platform-specific tools that
-don't always cooperate. Easiest path: build each platform on its
-own machine, or on a CI runner with that OS.
-
-### Tooling
-
-```bash
-pnpm icon                  # regenerate all icon sizes from assets/icon-source.png
-pnpm icon:regen            # regenerate the source PNG, then re-derive all sizes
-```
-
-## Architecture
-
-```
-VibeRunner/
-├── vibe.config.json            # user-editable source of truth
-├── assets/icon-source.png      # 1024×1024 mark; `pnpm icon` produces all sizes
-├── scripts/generate-icon.py    # PIL script that builds icon-source.png
-├── package.json                # all build commands
-├── src/                        # React + TS frontend
-│   ├── App.tsx                 # shell, state, event subscriptions
-│   ├── types.ts                # wire types (mirror Rust events/config)
-│   ├── hooks/
-│   │   └── useRunnerEvents.ts  # runtime (status+ports, rehydrated via get_statuses), restarting
-│   └── components/
-│       ├── Sidebar.tsx
-│       ├── ProjectCard.tsx
-│       ├── ProjectDetail.tsx
-│       ├── ProjectForm.tsx     # add-project modal (with folder picker)
-│       ├── StatusPill.tsx
-│       ├── LogViewer.tsx       # xterm.js wrapper
-│       └── PortList.tsx
-└── src-tauri/                  # Rust backend
-    └── src/
-        ├── main.rs             # bin entry
-        ├── lib.rs              # Tauri builder, command registration
-        ├── config.rs           # VibeConfig / ProjectConfig / ResolvedProject,
-        │                       # JSONC parse, TOML auto-discovery, atomic write
-        ├── state.rs            # AppState (config + per-project handles)
-        ├── events.rs           # typed Tauri events (project:* + config:reloaded)
-        ├── commands.rs         # #[tauri::command] handlers (thin)
-        ├── lifecycle.rs        # spawn / monitor / stop / ports / restart
-        ├── pty.rs              # portable-pty wrapper, .env auto-load
-        ├── process.rs          # keystrokes + identity-checked ProcessTree
-        ├── ports.rs            # lsof / netstat parsing
-        ├── artifacts.rs        # build-output discovery
-        ├── runner.rs           # RunnerHandle
-        └── watcher.rs          # file-system watcher with debounce
-```
-
-### Events (Rust → React)
-
-| Event | Payload | When |
+| Key | Required | Meaning |
 |---|---|---|
-| `project:status` | `{ id, status, action?, reason? }` | Any status transition; `action` names the action whose PTY is alive |
-| `project:output` | `{ id, chunk: number[] }` | Streamed PTY bytes (≤4 KiB chunks) |
-| `project:ports` | `{ id, ports: number[] }` | Snapshot every 2s while active |
-| `project:restarting` | `{ id, attempt, max, delayMs }` | Auto-restart timer fired |
-| `config:reloaded` | `{ config, projects, path }` | File watcher or Add/Remove |
+| `version` | no | Always `1`. |
+| `name` | no | Display name in the sidebar (defaults to the project's id). |
+| `[setup] script` | no | Adds a **Setup** button. **Restart** runs it before the primary action and only continues if it succeeds. |
+| `[build] script` | no | Adds a **Build** button (same as an action with `icon = "build"`). |
+| `[[actions]]` | no | One button per entry, in file order. |
+| `actions.name` | yes | Button label. |
+| `actions.command` | yes | Shell command, run from the project folder (`cmd /C` on Windows, `sh -c` elsewhere). |
+| `actions.icon` | no | `run`, `stop`, `build`, `test`, `tool`, `migrate`. Decides the button's icon **and role** (below). |
+| `actions.platform` | no | `windows`, `unix` (macOS + Linux), `macos`, `linux`. Omit for "every OS". Actions for other OSes are hidden. |
+| `actions.detached` | no | `true` if the command starts something in the background and returns at once (`nohup … &`). The project then stays **Running** while anything it started is alive. |
 
-### Commands (React → Rust)
+**Roles.** A few buttons have special meaning; VibeRunner finds them by
+`icon` first, then by name:
 
-| Command | Purpose |
+| Role | Found by | What it does |
+|---|---|---|
+| Primary | `icon = "run"` or name `Run` (else the first action) | Highlighted button, what **Restart** and **Run all** start, the only action that triggers browser auto-open. |
+| Stop | `icon = "stop"` or name `Stop` | Runs when you click **Stop**, alongside Ctrl+C; may also be a keystroke like `Ctrl+C`. Optional. |
+| Build | `icon = "build"` or name `Build` | Shown as its own button. If you declare none, VibeRunner offers one when it recognizes your build system (`package.json` build script, `Cargo.toml`, `Makefile` build target, `go.mod`, `scripts/build.sh`). |
+
+**Environment.** A `.env` file in the project folder is loaded into
+every command's environment automatically.
+
+## Using VibeRunner
+
+**Sidebar.** Every project with its status: Stopped, Starting,
+Running (with uptime), Stopping, or Crashed (with the exit code).
+`Ctrl F` / `⌘F` searches. Hover a card to open its folder, open its
+TOML, or remove it from the list (this never deletes files).
+
+**Toolbar.**
+
+- **Run** (primary action), and every other action, start in a fresh
+  terminal. One action runs per project at a time.
+- **Stop** runs your Stop action (if any) and sends Ctrl+C. Whatever is
+  still running after 3 seconds is terminated, then force-killed, so
+  Stop always finishes, usually within a second or two. Only processes
+  this project started are touched.
+- **Restart** = Stop → Setup (if any) → primary action.
+- **Clean up** appears after a crash: it stops anything the crashed run
+  left behind.
+- **localhost:PORT** opens the app. **Auto-open** opens it once per run,
+  when Run first reports its URL.
+
+**Install / Run bar.** When a project contains build outputs (an
+installer and/or an app binary), VibeRunner shows the newest of each.
+The arrow lists other matches, and the list refreshes after every run.
+
+**Tabs.**
+
+- **Logs**: live, colored terminal output. Click into it to type
+  (answer prompts, press keys). Copy, clear, and maximize from the
+  tab bar.
+- **Ports**: every port the project's processes listen on.
+- **Details**: the resolved actions, commands, and any warnings.
+
+**Header.** Run all / Stop all, reload config, theme toggle (system /
+light / dark), and the path of your project list. Click the path to
+open it.
+
+**Where the project list lives.** The installed app keeps it at:
+
+| OS | Path |
 |---|---|
-| `get_config` / `get_config_path` | Inspect the loaded config |
-| `list_projects` | Get the resolved projects (TOML + manual merged) |
-| `reload_config` | Re-read `vibe.config.json` from disk |
-| `add_project` / `remove_project` | Mutate the file (atomic write) |
-| `run_action` | Run a named action in a fresh PTY |
-| `setup_project` | Run the project's implicit "Setup" action |
-| `stop_project` | Kill the current PTY (keystroke → SIGTERM → SIGKILL) |
-| `restart_project` | Stop → setup → primary action (sequential) |
-| `write_to_pty` | Pipe user keystrokes into the active PTY |
+| Windows | `%APPDATA%\com.viberunner.app\vibe.config.json` |
+| macOS | `~/Library/Application Support/com.viberunner.app/vibe.config.json` |
+| Linux | `~/.local/share/com.viberunner.app/vibe.config.json` |
 
-## Caveats
+You rarely need to edit it by hand (use **New** and the trash button),
+but it's plain JSON with comments allowed, and VibeRunner reloads it
+when it changes. Set the `VIBE_CONFIG` environment variable to use a
+different file.
 
-- **For detached processes, set `detached: true` on the action.**
-  When the launcher script detaches (e.g. `nohup start.sh &`
-  returning after a health check passes), VibeRunner tracks the
-  *whole process tree* and keeps the project "Running" as long as
-  any descendant is alive. The "Run" action in your project's
-  TOML/inline config should be marked `detached: true` if the
-  command returns before the app exits.
-- **`.env` is loaded automatically** into the spawned PTY's env.
-  If your start script also loads it (e.g. via `dotenv` or by
-  sourcing it), the values are loaded twice — fine, just be aware.
-- **Windows port detection** parses `netstat -ano` by wildcard
-  foreign address, so it works with localized Windows too.
+<details>
+<summary>Manual projects (commands stored in VibeRunner instead of the repo)</summary>
 
-## Release setup
+Choosing **Manual** in the New dialog stores the commands in your
+project list instead of the repo. Use it for folders you can't or don't
+want to change. The same fields are available, plus per-project
+environment variables and an auto-restart policy:
 
-The app builds an unsigned `.dmg` (mac) or `.msi` (Windows) locally
-via `pnpm build:mac` / `pnpm build:win`. You can share these
-directly, but:
+```jsonc
+{
+  "version": 2,
+  "projects": [
+    {
+      "id": "static-site",
+      "path": "C:\\dev\\static-site",
+      "manual": true,
+      "setup": { "command": "npm install" },
+      "actions": [
+        { "name": "Run", "icon": "run", "command": "npx serve -l 8080" }
+      ],
+      "env": { "NODE_ENV": "development" },
+      "autoRestart": { "enabled": true, "maxRetries": 3, "delayMs": 2000 }
+    }
+  ]
+}
+```
 
-- **macOS** users will see a "cannot be opened because the
-  developer cannot be verified" warning. They can right-click →
-  Open to bypass. Smooth first-run requires the **Apple Developer
-  Program** ($99/yr), which includes the signing certificate and
-  notarization.
-- **Windows** users will see a SmartScreen "Unknown publisher"
-  warning. Smooth first-run requires a Windows code signing cert
-  (~$0 for OSS via SignPath.io, ~$60-400/yr otherwise).
+`env` values override the project's `.env`. With `autoRestart`, a crash
+re-runs the action up to `maxRetries` times in a row.
+</details>
 
-To actually publish signed releases, the missing piece is a CI
-workflow that:
+## Troubleshooting
 
-1. Builds for each target OS
-2. Signs with the appropriate cert (from CI secrets)
-3. Publishes to a GitHub Release with `latest.json` next to it
+| Problem | Fix |
+|---|---|
+| A button is missing | Check **Details**: actions for another OS are hidden on purpose, and TOML errors are shown as warnings. |
+| PowerShell action fails with *"Illegal characters in path"* | Use backslashes: `-File ".\scripts\run.ps1"`. |
+| PowerShell says scripts are disabled | Add `-ExecutionPolicy Bypass` to the command (see the examples). |
+| Project shows **Stopped** right after Run, but the app is running | The command started the app in the background and exited. Run it in the foreground, or set `detached = true`. |
+| No port shows up | The port must be opened by a process the project started, or printed as `http://localhost:PORT` in the logs. Apps inside Docker count if they print their URL. |
+| `command not found` on macOS (`pnpm`, `node`, …) | VibeRunner loads your login shell's `PATH`. Make sure the tool is on `PATH` in `~/.zprofile` or `~/.zshrc`, then restart VibeRunner. |
+| Stop finishes but something is still running | The leftover wasn't started by this project (e.g. a container started with `-d`). Add a Stop action such as `docker compose down`. |
 
-If you want help with the CI workflow when you're ready, ask.
+Found a bug? [Open an issue](https://github.com/CreaperLost/VibeRunner/issues)
+with your OS, the action's command, and the log output.
+
+## Build from source
+
+You need [Node.js](https://nodejs.org/) (LTS), [pnpm](https://pnpm.io/),
+and [Rust](https://rustup.rs/) (stable), plus the platform tools Tauri
+needs:
+
+- **Windows:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+  with "Desktop development with C++".
+- **macOS:** `xcode-select --install`.
+- **Linux (Debian/Ubuntu):**
+  `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf`
+
+See [Tauri's prerequisites](https://tauri.app/start/prerequisites/)
+for other distributions. Then:
+
+```bash
+git clone https://github.com/CreaperLost/VibeRunner.git
+cd VibeRunner
+pnpm install
+pnpm tauri dev        # run in development mode
+```
+
+Build installers for your current OS:
+
+```bash
+pnpm build:win        # Windows → src-tauri/target/release/bundle/nsis/*-setup.exe (+ .msi)
+pnpm build:mac        # macOS   → src-tauri/target/release/bundle/dmg/*.dmg
+pnpm build:linux      # Linux   → src-tauri/target/release/bundle/{appimage,deb,rpm}/
+```
+
+Contributing? [AGENTS.md](AGENTS.md) explains the architecture,
+conventions, and how to test (`pnpm test`).
 
 ## License
 
-TBD
+[MIT](LICENSE) © George Paterakis

@@ -59,9 +59,14 @@ venv/
 .codex/environments/*
 !.codex/environments/environment.toml
 
-# Editor directories and operating-system files
-.vscode/*
-!.vscode/extensions.json
+# Your personal project list. In dev (`pnpm tauri dev`) VibeRunner uses a
+# vibe.config.json found by walking up from the working directory; the
+# installed app keeps it in its app-data folder instead.
+/vibe.config.json
+
+# Editor / agent directories and operating-system files
+.vscode/
+.claude/
 .idea/
 .DS_Store
 Thumbs.db

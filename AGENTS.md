@@ -62,7 +62,7 @@ the parent shell's env).
 
 ```
 VibeRunner/
-├── vibe.config.json            # list of projects (each = a folder)
+├── vibe.config.json            # (gitignored) your local project list in dev
 ├── .codex/
 │   └── environments/
 │       └── environment.toml    # VibeRunner's OWN Start/Stop/Build actions
@@ -111,7 +111,7 @@ VibeRunner/
 ├── package.json                # all build commands live here
 ├── AGENTS.md                   # this file
 ├── README.md                   # user-facing docs
-└── vibe.config.json            # sample projects
+└── LICENSE                     # MIT
 ```
 
 ## Commands (the only ones that matter)
