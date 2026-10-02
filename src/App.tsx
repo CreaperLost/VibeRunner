@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -6,9 +6,8 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { openLocalPath } from "./utils";
+import { errorText, isActiveStatus, openLocalPath } from "./utils";
 import type {
-  ProjectStatus,
   ResolvedProject,
   StatusPayload,
   VibeConfig,
@@ -17,12 +16,12 @@ import type {
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ProjectDetail } from "./components/ProjectDetail";
-import {
-  useCurrentActions,
-  useProjectPorts,
-  useProjectStatuses,
-} from "./hooks/useRunnerEvents";
+import { Icon } from "./components/Icon";
+import { runtimeOf, useProjectRuntime } from "./hooks/useRunnerEvents";
 import { usePersistentState } from "./hooks/usePersistentState";
+
+type Theme = "system" | "light" | "dark";
+const THEME_ORDER: Theme[] = ["system", "light", "dark"];
 import "./styles.css";
 
 function App() {
@@ -34,9 +33,13 @@ function App() {
   const [reloading, setReloading] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
 
-  const statuses = useProjectStatuses();
-  const currentActions = useCurrentActions();
-  const ports = useProjectPorts();
+  const runtime = useProjectRuntime();
+
+  const [theme, setTheme] = usePersistentState<Theme>("viberunner.theme", "system");
+  useEffect(() => {
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
 
   const [sidebarWidth, setSidebarWidth] = usePersistentState<number>(
     "viberunner.sidebar.width",
@@ -99,7 +102,7 @@ function App() {
       const p = await invoke<VibeConfigPath>("get_config_path");
       applyConfig(cfg, resolved, p.path);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      setError(errorText(e));
     } finally {
       setReloading(false);
     }
@@ -114,7 +117,7 @@ function App() {
         const p = await invoke<VibeConfigPath>("get_config_path");
         applyConfig(cfg, resolved, p.path);
       } catch (e) {
-        setError(typeof e === "string" ? e : String(e));
+        setError(errorText(e));
       }
     })();
   }, [applyConfig]);
@@ -147,6 +150,8 @@ function App() {
   // then fire a notification whenever any project transitions to
   // "crashed" (auto-restart failures included). One notification per
   // crash, not on every status update.
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
     let cancelled = false;
@@ -163,7 +168,7 @@ function App() {
         if (cancelled) return;
         if (e.payload.status !== "crashed") return;
         const id = e.payload.id;
-        const name = projects.find((p) => p.id === id)?.name ?? id;
+        const name = projectsRef.current.find((p) => p.id === id)?.name ?? id;
         const reason = e.payload.reason ? ` — ${e.payload.reason}` : "";
         sendNotification({
           title: `${name} crashed`,
@@ -181,10 +186,6 @@ function App() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-    // We intentionally only run this once. `projects` is captured at
-    // mount time — by design, we want crash notifications even if the
-    // user has the project list open in a stale closure.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const runAction = useCallback(
@@ -196,7 +197,7 @@ function App() {
       } catch (e) {
         setError(
           `run_action(${actionName}) failed: ${
-            typeof e === "string" ? e : String(e)
+            errorText(e)
           }`
         );
       } finally {
@@ -214,7 +215,7 @@ function App() {
         await invoke("setup_project", { projectId });
       } catch (e) {
         setError(
-          `setup_project failed: ${typeof e === "string" ? e : String(e)}`
+          `setup_project failed: ${errorText(e)}`
         );
       } finally {
         setPendingId((cur) => (cur === projectId ? null : cur));
@@ -231,7 +232,7 @@ function App() {
         await invoke("build_project", { projectId });
       } catch (e) {
         setError(
-          `build_project failed: ${typeof e === "string" ? e : String(e)}`
+          `build_project failed: ${errorText(e)}`
         );
       } finally {
         setPendingId((cur) => (cur === projectId ? null : cur));
@@ -247,7 +248,7 @@ function App() {
       await invoke("stop_project", { projectId });
     } catch (e) {
       setError(
-        `stop_project failed: ${typeof e === "string" ? e : String(e)}`
+        `stop_project failed: ${errorText(e)}`
       );
     } finally {
       setPendingId((cur) => (cur === projectId ? null : cur));
@@ -261,7 +262,7 @@ function App() {
       await invoke("restart_project", { projectId });
     } catch (e) {
       setError(
-        `restart_project failed: ${typeof e === "string" ? e : String(e)}`
+        `restart_project failed: ${errorText(e)}`
       );
     } finally {
       setPendingId((cur) => (cur === projectId ? null : cur));
@@ -269,19 +270,12 @@ function App() {
   }, []);
 
   // Bulk actions: start every stopped project, stop every active one.
-  const inactive = projects.filter((p) => {
-    const s = statuses.get(p.id) ?? "stopped";
-    return s === "stopped" || s === "crashed";
-  });
-  const active = projects.filter((p) => {
-    const s = statuses.get(p.id);
-    return s === "running" || s === "starting" || s === "stopping";
-  });
+  const inactive = projects.filter((p) => !isActiveStatus(runtimeOf(runtime, p.id).status));
+  const active = projects.filter((p) => isActiveStatus(runtimeOf(runtime, p.id).status));
 
   const runAll = useCallback(async () => {
     for (const p of inactive) {
-      const primary = p.primaryAction ?? p.actions[0]?.name;
-      if (primary) runAction(p.id, primary);
+      if (p.primaryAction) runAction(p.id, p.primaryAction);
     }
   }, [inactive, runAction]);
 
@@ -297,118 +291,93 @@ function App() {
       await openLocalPath(configPath);
     } catch (e) {
       setError(
-        `Could not open config file: ${typeof e === "string" ? e : String(e)}`
+        `Could not open config file: ${errorText(e)}`
       );
     }
   }, [configPath]);
 
   const selectedProject =
     projects.find((p) => p.id === selectedId) ?? null;
-  const selectedStatus: ProjectStatus =
-    (selectedId && statuses.get(selectedId)) || "stopped";
+  const nextTheme = THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length];
 
   return (
     <div className="app">
       <header className="app__header">
         <div className="app__brand">
-          <span className="app__logo">▶</span>
+          <span className="app__logo">
+            <Icon name="play" size={12} />
+          </span>
           <h1 className="app__title">VibeRunner</h1>
         </div>
-        <div className="app__meta">
-          <span
-            className="app__config-path"
-            title={configPath || "(no config loaded)"}
-          >
-            {configPath || "(no config loaded)"}
-          </span>
-          <div className="app__bulk">
-            <button
-              type="button"
-              className="btn btn--small"
-              onClick={runAll}
-              disabled={inactive.length === 0}
-              title={
-                inactive.length === 0
-                  ? "No stopped projects to start"
-                  : `Start ${inactive.length} stopped project${
-                      inactive.length === 1 ? "" : "s"
-                    }`
-              }
-            >
-              ▶ Run all
-            </button>
-            <button
-              type="button"
-              className="btn btn--small"
-              onClick={stopAll}
-              disabled={active.length === 0}
-              title={
-                active.length === 0
-                  ? "No active projects to stop"
-                  : `Stop ${active.length} active project${
-                      active.length === 1 ? "" : "s"
-                    }`
-              }
-            >
-              ■ Stop all
-            </button>
-          </div>
+        <button
+          type="button"
+          className="app__config-path"
+          onClick={openConfigInEditor}
+          disabled={!configPath}
+          title={configPath ? `Open ${configPath}` : "No config loaded"}
+        >
+          {configPath || "(no config loaded)"}
+        </button>
+        <div className="app__actions">
           <button
             type="button"
-            className="btn"
-            onClick={reload}
-            disabled={reloading}
-            title="Reload vibe.config.json from disk"
+            className="btn btn--small btn--ghost"
+            onClick={runAll}
+            disabled={inactive.length === 0}
+            title={inactive.length ? `Start ${inactive.length} idle project(s)` : "Nothing to start"}
           >
-            {reloading ? "Reloading…" : "↻ Reload"}
+            <Icon name="play" size={12} />
+            Run all
           </button>
           <button
             type="button"
-            className="btn"
-            onClick={openConfigInEditor}
-            disabled={!configPath}
-            title={
-              configPath
-                ? `Open ${configPath} in your default editor`
-                : "No config loaded"
-            }
+            className="btn btn--small btn--ghost"
+            onClick={stopAll}
+            disabled={active.length === 0}
+            title={active.length ? `Stop ${active.length} active project(s)` : "Nothing running"}
           >
-            ↗ Open
+            <Icon name="stop" size={12} />
+            Stop all
+          </button>
+          <span className="app__divider" />
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={reload}
+            disabled={reloading}
+            title="Reload vibe.config.json"
+          >
+            <Icon name="refresh" size={15} className={reloading ? "spin" : undefined} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setTheme(nextTheme)}
+            title={`Theme: ${theme} (click for ${nextTheme})`}
+          >
+            <Icon name={theme === "light" ? "sun" : theme === "dark" ? "moon" : "monitor"} size={15} />
           </button>
         </div>
       </header>
 
       {error && (
-        <div
-          className="app__error"
-          role="alert"
-          onClick={() => setError(null)}
-        >
-          <strong>Error:</strong> {error}
-          <span className="app__error-dismiss"> (click to dismiss)</span>
+        <div className="app__error" role="alert">
+          <Icon name="alert" size={14} />
+          <span className="app__error-text">{error}</span>
+          <button type="button" className="icon-btn icon-btn--sm" onClick={() => setError(null)} title="Dismiss">
+            <Icon name="x" size={12} />
+          </button>
         </div>
       )}
 
       <div className={`app__body${isResizing ? " app__body--resizing" : ""}`}>
         <Sidebar
           projects={projects}
-          statuses={statuses}
-          currentActions={currentActions}
-          ports={ports}
+          runtime={runtime}
           selectedId={selectedId}
           onSelect={setSelectedId}
           onConfigReloaded={(payload) => {
             applyConfig(payload.config, payload.projects, payload.path);
-          }}
-          onRemoveProject={(id) => {
-            setProjects((prev) => prev.filter((p) => p.id !== id));
-            setSelectedId((cur) => {
-              if (cur === id) {
-                const remaining = projects.filter((p) => p.id !== id);
-                return remaining[0]?.id ?? null;
-              }
-              return cur;
-            });
           }}
           onError={setError}
           width={sidebarWidth}
@@ -424,17 +393,14 @@ function App() {
         />
         <ProjectDetail
           project={selectedProject}
-          status={selectedStatus}
-          currentAction={
-            selectedId ? currentActions.get(selectedId) ?? null : null
-          }
-          detectedPorts={selectedId ? ports.get(selectedId) ?? [] : []}
+          runtime={runtimeOf(runtime, selectedId)}
           pending={pendingId === selectedId}
           onRunAction={runAction}
           onSetup={setupProject}
           onBuild={buildProject}
           onStop={stopProject}
           onRestart={restartProject}
+          onError={setError}
         />
       </div>
     </div>

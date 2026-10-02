@@ -66,6 +66,19 @@ pub struct StatusPayload {
     /// Optional human-readable reason (e.g. spawn failure message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// When the current action started (ms since epoch). Lets the UI
+    /// show an elapsed timer so a stuck state is obvious.
+    #[serde(rename = "startedAtMs", skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+}
+
+/// One entry of `get_statuses` — the full runtime view of a project,
+/// used to rehydrate the UI after a webview reload.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusSnapshot {
+    #[serde(flatten)]
+    pub status: StatusPayload,
+    pub ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,10 +1,11 @@
-//! Cross-process signalling: keystroke parsing + kill escalation +
-//! process-tree walk.
+//! Cross-process signalling: keystroke parsing, process-tree tracking
+//! with identity checks, and kill escalation.
 
-use std::collections::HashSet;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
 
 /// Parse a user-friendly keystroke string into raw bytes for the PTY.
 ///
@@ -25,10 +26,25 @@ pub fn parse_keystrokes(s: &str) -> Vec<u8> {
     out
 }
 
-/// How long to wait between escalation steps. Tunable later; these are
-/// sane defaults that match npm/python ergonomics.
+/// True when a configured Stop command is a keystroke to send into the
+/// PTY rather than a script to run.
+pub fn is_pure_keystroke(s: &str) -> bool {
+    matches!(
+        s.trim(),
+        "^C" | "Ctrl-C" | "Ctrl+C"
+            | "^D" | "Ctrl-D" | "Ctrl+D"
+            | "^Z" | "Ctrl-Z" | "Ctrl+Z"
+            | "^\\" | "Ctrl-\\" | "Ctrl+\\"
+            | "^?" | "Ctrl-?" | "Ctrl+?"
+    )
+}
+
+/// Stop escalation timing: keystroke/stop script → polite terminate →
+/// force kill → give up and report Stopped anyway. Every step is
+/// skipped as soon as the tree is observed dead.
 pub const GRACE_AFTER_KEYSTROKE: Duration = Duration::from_secs(3);
 pub const GRACE_AFTER_SIGTERM: Duration = Duration::from_secs(3);
+pub const GRACE_AFTER_SIGKILL: Duration = Duration::from_secs(3);
 
 // ===== Hidden child processes ==============================================
 //
@@ -37,8 +53,8 @@ pub const GRACE_AFTER_SIGTERM: Duration = Duration::from_secs(3);
 // console of its own**. When a console-subsystem child is spawned from
 // a process with no console, Windows cannot attach it to anything, so
 // it allocates a brand-new console window for it — the user sees a
-// terminal flash open and vanish. `taskkill` and `netstat` are both
-// console programs, so every helper spawn produced one of these.
+// terminal flash open and vanish. `netstat` and `cmd` are console
+// programs, so every helper spawn would produce one of these.
 //
 // `CREATE_NO_WINDOW` tells Windows to run the child with its console
 // hidden instead. It is a no-op on other platforms.
@@ -57,168 +73,232 @@ pub fn hidden_command(program: &str) -> std::process::Command {
     cmd
 }
 
-// ===== Process-tree kill ===================================================
+// ===== Process identity =====================================================
 //
-// `npm run dev` typically spawns a chain like:
-//     sh -c "npm run dev" → npm → sh -c "node …" → node server.js
-// Killing just the top PID leaves the grandchildren alive, hanging the
-// port and frustrating the user. The fix is to walk the process tree
-// rooted at the runner's PID and signal each descendant.
+// A bare PID is not an identity: every OS recycles them, Windows very
+// aggressively. The old tracker kept every PID it had ever seen and
+// treated "a process with that PID exists" as "still ours", which made
+// projects stick in Running/Stopping forever (a recycled PID never dies)
+// and made Stop `taskkill /T /F` unrelated processes.
 //
-// We use `sysinfo` rather than `setsid`/process groups because:
-//   - `setsid` is not universally available (e.g. macOS has no
-//     `/usr/bin/setsid` on a default install).
-//   - `sysinfo` works identically on Unix and Windows.
+// Every tracked process is therefore keyed by (pid, start_time). A
+// process is adopted into the tree only if its parent is a tracked
+// process *and* it started no earlier than that parent. Dead entries are
+// pruned on every refresh, but remembered briefly so orphans (children
+// whose parent already exited, e.g. `nohup … &`) can still be adopted —
+// only if they started before the parent was observed dead, which a
+// recycled-PID impostor's children never do.
 
-/// Walk the live process tree rooted at `root_pid` and return every
-/// descendant's PID (including the root itself). Order is unspecified.
-///
-/// We use `refresh_processes(All, /*remove_dead=*/ false)` so a
-/// tree-walk can still see recently-killed zombies.
-#[allow(dead_code)]
-pub fn collect_descendants(root_pid: u32) -> Vec<u32> {
-    let mut sys = System::new_all();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        false,
-        ProcessRefreshKind::everything(),
-    );
-    collect_descendants_in(&sys, root_pid)
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
-/// Same as [`collect_descendants`] but reuses an existing `System`
-/// snapshot — useful when you want to do a tree-walk plus other
-/// queries on the same view (e.g. "is anything in the tree alive?").
-fn collect_descendants_in(sys: &System, root_pid: u32) -> Vec<u32> {
-    let mut all = vec![root_pid];
-    let mut to_visit = vec![root_pid];
-    while let Some(current) = to_visit.pop() {
-        let current_pid = Pid::from_u32(current);
-        for (child_pid, proc) in sys.processes() {
-            if let Some(parent) = proc.parent() {
-                if parent == current_pid && !all.contains(&child_pid.as_u32()) {
-                    let child_u32 = child_pid.as_u32();
-                    all.push(child_u32);
-                    to_visit.push(child_u32);
+/// Fresh, cheap process-table snapshot (pid, parent, start time, status).
+pub fn snapshot() -> System {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::new());
+    sys
+}
+
+fn is_live(p: &Process) -> bool {
+    !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead)
+}
+
+/// How long a dead entry is remembered for orphan adoption.
+const DEAD_MEMORY_SECS: u64 = 600;
+
+/// The set of processes a run owns, with identity checks.
+#[derive(Debug, Default)]
+pub struct ProcessTree {
+    root: Option<(u32, u64)>,
+    live: HashMap<u32, u64>,
+    /// pid → (start_time, observed_dead_at)
+    dead: HashMap<u32, (u64, u64)>,
+}
+
+impl ProcessTree {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget everything and start a new tree rooted at `pid`.
+    pub fn reset(&mut self, pid: Option<u32>) {
+        self.live.clear();
+        self.dead.clear();
+        self.root = None;
+        let Some(pid) = pid else { return };
+        let sys = snapshot();
+        let start = sys
+            .process(Pid::from_u32(pid))
+            .map(|p| p.start_time())
+            .filter(|&s| s != 0)
+            .unwrap_or_else(now_secs);
+        self.root = Some((pid, start));
+        self.live.insert(pid, start);
+    }
+
+    /// Clear all tracking (after a clean stop).
+    pub fn clear(&mut self) {
+        self.reset(None);
+    }
+
+    pub fn pids(&self) -> Vec<u32> {
+        self.live.keys().copied().collect()
+    }
+
+    /// Prune dead / recycled entries and adopt new descendants.
+    /// Returns `true` if any owned process is still alive.
+    pub fn refresh(&mut self, sys: &System) -> bool {
+        let now = now_secs();
+
+        // 1. Prune: an entry survives only if the same process (same
+        //    start time) is still in the table and not a zombie.
+        let mut died = Vec::new();
+        for (&pid, &start) in &self.live {
+            let same = sys
+                .process(Pid::from_u32(pid))
+                .map(|p| p.start_time() == start && is_live(p))
+                .unwrap_or(false);
+            if !same {
+                died.push((pid, start));
+            }
+        }
+        for (pid, start) in died {
+            self.live.remove(&pid);
+            self.dead.insert(pid, (start, now));
+        }
+        self.dead
+            .retain(|_, (_, died_at)| now.saturating_sub(*died_at) < DEAD_MEMORY_SECS);
+
+        // 2. Adopt descendants until a fixed point.
+        let root = self.root;
+        loop {
+            let mut added = false;
+            for (pid, proc) in sys.processes() {
+                let pid = pid.as_u32();
+                if self.live.contains_key(&pid) || !is_live(proc) {
+                    continue;
+                }
+                let start = proc.start_time();
+                if start == 0 {
+                    // Unknown start time (no access) — can't prove identity.
+                    continue;
+                }
+                let by_parent = proc.parent().map(|pp| pp.as_u32()).is_some_and(|pp| {
+                    if let Some(&ps) = self.live.get(&pp) {
+                        start >= ps
+                    } else if let Some(&(ps, died_at)) = self.dead.get(&pp) {
+                        // Orphan: must have started while its parent lived.
+                        start >= ps && start <= died_at
+                    } else {
+                        false
+                    }
+                });
+                // On Unix the PTY child is a session leader (setsid), so
+                // anything still in its session belongs to the run even if
+                // it was reparented to init.
+                #[cfg(unix)]
+                let by_session = root.is_some_and(|(rp, rs)| {
+                    start >= rs && proc.session_id().map(|s| s.as_u32()) == Some(rp)
+                });
+                #[cfg(not(unix))]
+                let by_session = {
+                    let _ = root;
+                    false
+                };
+                if by_parent || by_session {
+                    self.live.insert(pid, start);
+                    added = true;
                 }
             }
+            if !added {
+                break;
+            }
+        }
+
+        !self.live.is_empty()
+    }
+
+    /// Add a PID from outside the tree (a PID file), only if that process
+    /// started at or after `since` — a stale PID file pointing at a
+    /// long-running unrelated process is rejected.
+    pub fn adopt_external(&mut self, sys: &System, pid: u32, since: u64) {
+        if self.live.contains_key(&pid) {
+            return;
+        }
+        if let Some(p) = sys.process(Pid::from_u32(pid)) {
+            let start = p.start_time();
+            if start != 0 && start + 1 >= since && is_live(p) {
+                self.live.insert(pid, start);
+            }
         }
     }
-    all
-}
 
-/// `true` if `root_pid` itself or any of its descendants is still in
-/// the live process table. Used by the "detached" waiter to know
-/// when the actual app has exited (even after the launcher script
-/// has returned and the PTY is dead).
-///
-/// Uses `remove_dead_processes: true` so the table is the source of
-/// truth for "alive".
-#[allow(dead_code)]
-pub fn any_descendant_alive(root_pid: u32) -> bool {
-    if root_pid == 0 {
-        return false;
-    }
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
-    let tree = collect_descendants_in(&sys, root_pid);
-    tree.iter()
-        .any(|pid| sys.process(Pid::from_u32(*pid)).is_some())
-}
-
-/// Discover new descendants of `root_pid` or any previously tracked PID.
-/// Updates `tracked` with newly discovered children and session members.
-/// Returns `true` if `root_pid` (if alive) or any discovered descendant is still running.
-pub fn update_and_check_alive(tracked: &mut HashSet<u32>, root_pid: u32) -> bool {
-    if root_pid == 0 && tracked.is_empty() {
-        return false;
-    }
-    if root_pid != 0 {
-        tracked.insert(root_pid);
-    }
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
-
-    let mut added = true;
-    while added {
-        added = false;
-        for (child_pid, proc) in sys.processes() {
-            let child_u32 = child_pid.as_u32();
-            if tracked.contains(&child_u32) {
+    /// Signal every owned process whose identity still checks out.
+    /// `force=false` → SIGTERM on Unix; on Windows there is no polite
+    /// signal for console trees, so both levels TerminateProcess.
+    pub fn kill(&self, force: bool) {
+        if self.live.is_empty() {
+            return;
+        }
+        let sys = snapshot();
+        for (&pid, &start) in &self.live {
+            if pid == std::process::id() {
                 continue;
             }
-            let is_child = proc.parent().map(|p| tracked.contains(&p.as_u32())).unwrap_or(false);
-            #[cfg(unix)]
-            let is_session = proc.session_id().map(|s| root_pid != 0 && s.as_u32() == root_pid).unwrap_or(false);
-            #[cfg(not(unix))]
-            let is_session = false;
-
-            if is_child || is_session {
-                tracked.insert(child_u32);
-                added = true;
+            let Some(p) = sys.process(Pid::from_u32(pid)) else { continue };
+            if p.start_time() != start {
+                continue; // recycled — not ours any more
+            }
+            if force {
+                p.kill();
+            } else if p.kill_with(sysinfo::Signal::Term).is_none() {
+                p.kill();
             }
         }
     }
-
-    let root_alive = root_pid != 0 && sys.process(Pid::from_u32(root_pid)).is_some();
-    let any_descendant_alive = tracked
-        .iter()
-        .any(|&p| p != root_pid && sys.process(Pid::from_u32(p)).is_some());
-
-    root_alive || any_descendant_alive
 }
 
-/// Inspect common PID file locations in `project_path` and return any valid, alive PIDs.
-pub fn discover_pid_files(project_path: &std::path::Path) -> Vec<u32> {
-    let mut pids = Vec::new();
+/// PID files (`*.pid`, `pid`) in the usual places that were written at or
+/// after `since`. Callers still pass each PID through
+/// [`ProcessTree::adopt_external`], which checks the process start time.
+pub fn fresh_pid_files(project_path: &Path, since: SystemTime) -> Vec<u32> {
     let candidates = [
+        project_path.to_path_buf(),
         project_path.join(".codex"),
-        project_path.join(".codex/environments"),
         project_path.join("data"),
         project_path.join("tmp"),
         project_path.join("pids"),
         project_path.join("run"),
         project_path.join(".run"),
-        project_path.to_path_buf(),
     ];
-
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-
+    let mut pids = Vec::new();
     for dir in candidates {
-        if !dir.exists() {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if name.ends_with(".pid") || name == "pid" {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            if let Ok(pid) = content.trim().parse::<u32>() {
-                                if pid != 0 {
-                                    #[cfg(unix)]
-                                    let alive = unsafe { libc::kill(pid as i32, 0) == 0 }
-                                        || sys.process(Pid::from_u32(pid)).is_some();
-                                    #[cfg(not(unix))]
-                                    let alive = sys.process(Pid::from_u32(pid)).is_some();
-
-                                    if alive && !pids.contains(&pid) {
-                                        pids.push(pid);
-                                    }
-                                }
-                            }
-                        }
-                    }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !(name.ends_with(".pid") || name == "pid") {
+                continue;
+            }
+            let fresh = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|m| m >= since)
+                .unwrap_or(false);
+            if !fresh {
+                continue;
+            }
+            if let Ok(pid) = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .trim()
+                .parse::<u32>()
+            {
+                if pid != 0 && !pids.contains(&pid) {
+                    pids.push(pid);
                 }
             }
         }
@@ -226,84 +306,76 @@ pub fn discover_pid_files(project_path: &std::path::Path) -> Vec<u32> {
     pids
 }
 
-
-/// Terminate all processes in `pids` and their descendants.
-pub fn kill_pids(pids: &[u32], force: bool) {
-    let set: HashSet<u32> = pids.iter().copied().filter(|&p| p != 0).collect();
-    if set.is_empty() {
-        return;
-    }
-
-    // Callers hand us a *flat* set — the root plus every descendant we
-    // have ever tracked. Signalling all of them is not just wasteful,
-    // it is user-visible on Windows: each `taskkill` spawn used to pop
-    // a console window, so one stop produced one terminal per process
-    // in the tree, most of them for PIDs that had already exited.
-    //
-    // On Windows `taskkill /T` already walks and terminates the whole
-    // subtree, so signalling the *roots* is sufficient and equivalent.
-    // On Unix we send a raw signal to a single PID with no group
-    // semantics, so every node still has to be signalled explicitly.
-    #[cfg(windows)]
-    let targets: Vec<u32> = {
-        let mut sys = System::new_all();
-        sys.refresh_processes(ProcessesToUpdate::All, false);
-        set.iter()
-            .copied()
-            .filter(|&pid| {
-                // Skip anything whose parent is also in the set — the
-                // ancestor's `/T` covers it.
-                !sys.process(Pid::from_u32(pid))
-                    .and_then(|p| p.parent())
-                    .map(|parent| set.contains(&parent.as_u32()))
-                    .unwrap_or(false)
-            })
-            .collect()
-    };
-    #[cfg(not(windows))]
-    let targets: Vec<u32> = set.iter().copied().collect();
-
-    for pid in targets {
-        terminate_pid(pid, force);
-    }
+/// Seconds since the epoch for a `SystemTime`.
+pub fn to_secs(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Walk the tree rooted at `root_pid` and terminate every descendant.
-///
-/// `force = false` sends SIGTERM (Unix) or `taskkill /T` (Windows) —
-/// the polite ask, leaves a window for graceful shutdown.
-///
-/// `force = true` sends SIGKILL (Unix) or `taskkill /T /F` (Windows) —
-/// unconditional, used as the last step of escalation.
-#[allow(dead_code)]
-pub fn kill_tree(root_pid: u32, force: bool) {
-    if root_pid == 0 {
-        return;
-    }
-    kill_pids(&[root_pid], force);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(unix)]
-fn terminate_pid(pid: u32, force: bool) {
-    let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
-    // SAFETY: `libc::kill` is async-signal-safe. ESRCH (no such process)
-    // is the expected outcome for an already-dead descendant, so we
-    // intentionally ignore the return value.
-    unsafe {
-        libc::kill(pid as libc::pid_t, sig);
+    fn spawn_sleeper() -> std::process::Child {
+        #[cfg(windows)]
+        let child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+            .spawn();
+        #[cfg(unix)]
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn();
+        child.expect("spawn sleeper")
     }
-}
 
-#[cfg(windows)]
-fn terminate_pid(pid: u32, _force: bool) {
-    // Windows has no real SIGTERM. `taskkill /T` walks the tree and
-    // `TerminateProcess`es each node. We always pass /F because
-    // graceful termination of a console tree is unreliable without a
-    // shared console handle, which `portable_pty` doesn't expose.
-    //
-    // `hidden_command` is what keeps this from flashing a console
-    // window at the user on every single call.
-    let _ = hidden_command("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .output();
+    #[test]
+    fn keystrokes_parse() {
+        assert_eq!(parse_keystrokes("Ctrl+C"), vec![0x03]);
+        assert_eq!(parse_keystrokes("^C ^D"), vec![0x03, 0x04]);
+        assert!(is_pure_keystroke(" ^C "));
+        assert!(!is_pure_keystroke("./stop.sh"));
+    }
+
+    #[test]
+    fn tree_tracks_descendants_and_kills_them() {
+        let mut child = spawn_sleeper();
+        let mut tree = ProcessTree::new();
+        tree.reset(Some(child.id()));
+        // Give the shell a moment to spawn its child.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(tree.refresh(&snapshot()));
+        assert!(tree.pids().len() >= 2, "expected shell + child, got {:?}", tree.pids());
+
+        tree.kill(true);
+        let _ = child.wait();
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = tree.refresh(&snapshot());
+            if !alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!alive, "tree should be empty after kill, left: {:?}", tree.pids());
+    }
+
+    #[test]
+    fn recycled_pid_is_pruned_not_adopted() {
+        let mut tree = ProcessTree::new();
+        // Our own PID with a bogus start time stands in for a recycled PID.
+        let me = std::process::id();
+        tree.live.insert(me, 1);
+        tree.refresh(&snapshot());
+        assert!(!tree.live.contains_key(&me));
+    }
+
+    #[test]
+    fn stale_external_pid_is_rejected() {
+        let mut tree = ProcessTree::new();
+        let sys = snapshot();
+        // This test process started before "now + 60s".
+        tree.adopt_external(&sys, std::process::id(), now_secs() + 60);
+        assert!(tree.pids().is_empty());
+        tree.adopt_external(&sys, std::process::id(), 0);
+        assert!(!tree.pids().is_empty());
+    }
 }

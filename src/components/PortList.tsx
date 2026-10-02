@@ -1,43 +1,42 @@
 import { openBrowserUrl } from "../utils";
+import { Icon } from "./Icon";
 
 interface PortListProps {
-  projectId?: string;
   ports: number[];
+  active: boolean;
 }
 
 /**
- * Shows the list of TCP ports a running process is listening on, as
- * clickable links that open the local URL in the default browser.
- *
- * Renders directly from the app-level per-project port map.
+ * Listening TCP ports owned by the project's process tree, as clickable
+ * localhost links. The first entry is the URL the app printed, if any.
  */
-export function PortList({ ports }: PortListProps) {
-
+export function PortList({ ports, active }: PortListProps) {
   if (ports.length === 0) {
     return (
-      <p className="port-list__empty">
-        No listening ports detected yet.
-      </p>
+      <div className="empty-state">
+        <Icon name="plug" size={22} />
+        <p>{active ? "No listening ports yet." : "Not running."}</p>
+        <p className="empty-state__hint">
+          Ports appear when a process started by this project listens on one.
+        </p>
+      </div>
     );
   }
 
   return (
     <ul className="port-list">
-      {ports.map((port) => (
-        <li key={port} className="port-list__item">
+      {ports.map((port, i) => (
+        <li key={port}>
           <button
             type="button"
-            className="port-list__link"
-            onClick={() => {
-              openBrowserUrl(`http://localhost:${port}`).catch((e) =>
-                console.error("openBrowserUrl failed", e)
-              );
-            }}
-            title={`Open http://localhost:${port} in your browser`}
+            className="port-list__item"
+            onClick={() => openBrowserUrl(`http://localhost:${port}`).catch((e) => console.error(e))}
+            title={`Open http://localhost:${port}`}
           >
-            <span className="port-list__number">{port}</span>
-            <span className="port-list__url">localhost:{port}</span>
-            <span className="port-list__open">↗</span>
+            <span className="port-list__number">:{port}</span>
+            <span className="port-list__url">http://localhost:{port}</span>
+            {i === 0 && <span className="badge badge--accent">app</span>}
+            <Icon name="external" size={14} className="port-list__open" />
           </button>
         </li>
       ))}

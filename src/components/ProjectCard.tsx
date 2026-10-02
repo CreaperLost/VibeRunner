@@ -1,76 +1,63 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  ProjectStatus,
-  ResolvedProject,
-  VibeConfigReloadedPayload,
-} from "../types";
+import type { ProjectRuntime, ResolvedProject, VibeConfigReloadedPayload } from "../types";
 import { StatusPill } from "./StatusPill";
-import { openLocalPath, visibleProjectWarnings } from "../utils";
+import { Icon } from "./Icon";
+import { errorText, isActiveStatus, openLocalPath, visibleProjectWarnings } from "../utils";
 
 interface ProjectCardProps {
   project: ResolvedProject;
-  status: ProjectStatus;
-  currentAction: string | null;
-  ports?: number[];
+  runtime: ProjectRuntime;
   selected: boolean;
-  /** Compact view: avatar + name + status pill only. */
+  /** Compact view: avatar + name + status only. */
   compact?: boolean;
   onSelect: () => void;
   onConfigReloaded: (payload: VibeConfigReloadedPayload) => void;
-  onRemoveProject: (id: string) => void;
-  /** True if the project is currently active — disallows removal. */
-  busy?: boolean;
-  /** Optional callback to surface an error to the app-level banner. */
   onError?: (msg: string) => void;
 }
 
-/**
- * Stable, visually-distinct hue derived from the project id. The same
- * project always gets the same color, so the sidebar reads as a list
- * of identifiable chips rather than a rainbow.
- */
-function avatarStyle(id: string): { background: string; color: string } {
+/** Stable hue derived from the project id. */
+function hueOf(id: string): number {
   let h = 0;
-  for (let i = 0; i < id.length; i++) {
-    h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  }
-  // Spread hues across the wheel but keep saturation/lightness in a
-  // tasteful band so every chip stays legible.
-  const hue = h % 360;
-  return {
-    background: `hsl(${hue}, 55%, 42%)`,
-    color: "#ffffff",
-  };
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return h % 360;
 }
 
 function avatarLetter(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return "?";
-  // First non-whitespace, non-symbol character — works for emoji-less
-  // names like "AI-Agent-Engineer" while still showing A.
-  for (const ch of trimmed) {
+  for (const ch of name.trim()) {
     if (/[\p{L}\p{N}]/u.test(ch)) return ch.toUpperCase();
   }
-  return trimmed[0].toUpperCase();
+  return name.trim()[0]?.toUpperCase() ?? "?";
+}
+
+export function Avatar({ id, name, size = "md" }: { id: string; name: string; size?: "md" | "lg" }) {
+  const hue = hueOf(id);
+  return (
+    <span
+      className={`avatar avatar--${size}`}
+      style={{
+        background: `linear-gradient(135deg, hsl(${hue} 62% 52%), hsl(${(hue + 40) % 360} 58% 40%))`,
+      }}
+      aria-hidden="true"
+    >
+      {avatarLetter(name)}
+    </span>
+  );
 }
 
 export function ProjectCard({
   project,
-  status,
-  currentAction,
-  ports: _ports = [],
+  runtime,
   selected,
   compact = false,
   onSelect,
   onConfigReloaded,
-  onRemoveProject,
-  busy = false,
   onError,
 }: ProjectCardProps) {
   const [removing, setRemoving] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const warnings = visibleProjectWarnings(project.warnings);
+  const busy = isActiveStatus(runtime.status);
 
   const handleRemove = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -81,188 +68,113 @@ export function ProjectCard({
       return;
     }
     setRemoving(true);
-    // Optimistically remove from UI immediately
-    onRemoveProject(project.id);
     try {
       const payload = await invoke<VibeConfigReloadedPayload>("remove_project", { id: project.id });
       onConfigReloaded(payload);
-    } catch (e) {
-      console.error("remove_project failed", e);
-      onError?.(typeof e === "string" ? e : String(e));
+    } catch (err) {
+      onError?.(`Could not remove ${project.name}: ${errorText(err)}`);
     } finally {
       setRemoving(false);
       setConfirming(false);
     }
   };
 
-  const handleOpenInFinder = async (e: React.MouseEvent) => {
+  const open = (target: string) => async (e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      await openLocalPath(project.path);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("openLocalPath failed", project.path, msg);
+      await openLocalPath(target);
+    } catch (err) {
+      const msg = errorText(err);
       onError?.(
-        `Couldn't open ${project.path} in Finder: ${msg}\n` +
+        `Couldn't open ${target}: ${msg}` +
           (msg.toLowerCase().includes("acl")
-            ? "Tip: this folder has a macOS ACL xattr. " +
-              "Try `xattr -d com.apple.macl " +
-              project.path +
-              "` in Terminal, or move the folder out of Desktop/Documents."
+            ? `\nTip: this folder has a macOS ACL xattr. Try \`xattr -d com.apple.macl ${target}\`.`
             : "")
       );
     }
   };
 
-  const handleOpenConfig = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    let target = project.path;
-    if (project.source === "toml") {
-      const tomlPath = `${project.path}/.codex/environments/environment.toml`;
-      target = tomlPath;
-    }
-    try {
-      await openLocalPath(target);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("openLocalPath failed", target, msg);
-      onError?.(`Couldn't open ${target}: ${msg}`);
-    }
+  const tomlPath = `${project.path}/.codex/environments/environment.toml`;
+  const pill = (
+    // The action name lives in the detail header; here it would squeeze
+    // the project name to nothing.
+    <StatusPill status={runtime.status} reason={runtime.reason} startedAtMs={compact ? null : runtime.startedAtMs} />
+  );
+
+  const common = {
+    role: "button" as const,
+    tabIndex: 0,
+    onClick: onSelect,
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onSelect();
+      }
+    },
+    "aria-current": selected || undefined,
   };
 
-  const sourceLabel =
-    project.source === "toml"
-      ? "TOML"
-      : project.source === "manual"
-        ? "Manual"
-        : "Empty";
-
-  // Compact action summary: "Run · Stop" or "Setup · Run · Stop"
-  const actionSummary = project.actions
-    .map((a) => a.name)
-    .join(" · ");
-
-  const avatar = (
-    <span
-      className="runner-card__avatar"
-      style={avatarStyle(project.id)}
-      aria-hidden="true"
-    >
-      {avatarLetter(project.name)}
-    </span>
-  );
-
-  const statusPill = (
-    <StatusPill status={status} action={currentAction} />
-  );
-
   if (compact) {
-    // Single-row layout: [avatar] name ........... [status]
-    // Pure click-to-select. No URL buttons, no action buttons, no path.
     return (
-      <div
-        role="button"
-        tabIndex={0}
-        className={`runner-card runner-card--compact${selected ? " runner-card--selected" : ""}`}
-        onClick={onSelect}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onSelect();
-          }
-        }}
-        title={project.name}
-      >
-        {avatar}
-        <span className="runner-card__name runner-card__name--compact" title={project.name}>
-          {project.name}
-        </span>
-        <div className="runner-card__status-group">{statusPill}</div>
+      <div {...common} className={`card card--compact${selected ? " card--selected" : ""}`} title={project.name}>
+        <Avatar id={project.id} name={project.name} />
+        <span className="card__name">{project.name}</span>
+        {pill}
       </div>
     );
   }
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      className={`runner-card${selected ? " runner-card--selected" : ""}${
-        busy ? " runner-card--busy" : ""
-      }`}
-      onClick={onSelect}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-    >
-      <div className="runner-card__header">
-        {avatar}
-        <span className="runner-card__name" title={project.name}>{project.name}</span>
-        <div className="runner-card__status-group">{statusPill}</div>
+    <div {...common} className={`card${selected ? " card--selected" : ""}${busy ? " card--busy" : ""}`}>
+      <div className="card__row">
+        <Avatar id={project.id} name={project.name} />
+        <div className="card__main">
+          <span className="card__name" title={project.name}>
+            {project.name}
+          </span>
+          <span className="card__path" title={project.path}>
+            {project.path}
+          </span>
+        </div>
+        {pill}
       </div>
-      <code className="runner-card__command">{actionSummary || "(no actions)"}</code>
+
       {warnings.length > 0 && (
-        <div
-          className="runner-card__warning"
-          title={warnings.join("\n")}
-        >
-          ⚠ {warnings[0]}
+        <div className="card__warning" title={warnings.join("\n")}>
+          <Icon name="alert" size={12} />
+          <span>{warnings[0]}</span>
         </div>
       )}
-      <div className="runner-card__footer">
-        <div className="runner-card__cwd" title={project.path}>
-          <span className="runner-card__path">{project.path}</span>
-          <span className="runner-card__sep">·</span>
-          <span className="runner-card__source">{sourceLabel}</span>
+
+      <div className="card__footer">
+        <div className="card__chips">
+          {runtime.ports.slice(0, 2).map((p) => (
+            <span key={p} className="chip chip--port">
+              :{p}
+            </span>
+          ))}
+          <span className="chip">{project.source === "toml" ? "TOML" : project.source === "manual" ? "Manual" : "Empty"}</span>
+          <span className="chip chip--muted">
+            {project.actions.length} action{project.actions.length === 1 ? "" : "s"}
+          </span>
         </div>
-        <div className="runner-card__actions">
-          <button
-            type="button"
-            className="runner-card__action-btn"
-            onClick={handleOpenInFinder}
-            title={`Open ${project.path} in Finder`}
-            aria-label="Open in Finder"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <div className="card__actions">
+          <button type="button" className="icon-btn icon-btn--sm" onClick={open(project.path)} title="Open folder">
+            <Icon name="folder" size={13} />
           </button>
+          {project.source === "toml" && (
+            <button type="button" className="icon-btn icon-btn--sm" onClick={open(tomlPath)} title="Open environment.toml">
+              <Icon name="settings" size={13} />
+            </button>
+          )}
           <button
             type="button"
-            className="runner-card__action-btn"
-            onClick={handleOpenConfig}
-            title={
-              project.source === "toml"
-                ? "Open environment.toml in your default editor"
-                : "Open the project folder"
-            }
-            aria-label="Open config"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </button>
-          <button
-            type="button"
-            className={`runner-card__action-btn runner-card__action-btn--danger${
-              confirming ? " runner-card__action-btn--confirm" : ""
-            }`}
+            className={`icon-btn icon-btn--sm icon-btn--danger${confirming ? " icon-btn--confirm" : ""}`}
             onClick={handleRemove}
             disabled={removing || busy}
-            title={
-              busy
-                ? "Cannot remove a running project"
-                : confirming
-                  ? "Click again to confirm"
-                  : "Remove this project"
-            }
-            aria-label="Remove project"
+            title={busy ? "Stop the project before removing it" : confirming ? "Click again to remove" : "Remove project"}
           >
-            {removing ? (
-              "…"
-            ) : confirming ? (
-              "Confirm?"
-            ) : (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-            )}
+            {confirming ? <span className="icon-btn__text">Remove?</span> : <Icon name="trash" size={13} />}
           </button>
         </div>
       </div>

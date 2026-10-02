@@ -124,8 +124,25 @@ export interface StatusPayload {
   status: ProjectStatus;
   /** Name of the action whose PTY is now alive (e.g. "Run", "Setup"). */
   action?: string | null;
-  /** Optional human-readable reason (e.g. spawn failure). */
+  /** Optional human-readable reason (e.g. spawn failure, "exit 1"). */
   reason?: string | null;
+  /** When the current action started (ms since epoch), while active. */
+  startedAtMs?: number | null;
+}
+
+/** One entry of `get_statuses` (rehydration after a webview reload). */
+export interface StatusSnapshot extends StatusPayload {
+  ports: number[];
+}
+
+/** Frontend view of a project's runtime state. */
+export interface ProjectRuntime {
+  status: ProjectStatus;
+  action: string | null;
+  reason: string | null;
+  startedAtMs: number | null;
+  /** Listening ports; the first is the URL the app announced, if any. */
+  ports: number[];
 }
 
 export interface OutputPayload {
@@ -164,14 +181,16 @@ export interface ProjectArtifact {
   kind: ArtifactKind;
   path: string;
   displayName: string;
-  /** Parent directory — for UI hints like "in target/release/bundle/macos". */
+  /** Parent directory relative to the project — e.g. "target/release/bundle/msi". */
   parent: string;
   sizeBytes: number;
   modifiedMs: number;
 }
 
-/** Top-ranked Install + Portable for a project (either may be null). */
+/** Top-ranked Install + Portable for a project (either may be null),
+ *  plus a few runners-up for the overflow menu. */
 export interface ArtifactsScan {
   install: ProjectArtifact | null;
   portable: ProjectArtifact | null;
+  others: ProjectArtifact[];
 }

@@ -78,7 +78,7 @@ VibeRunner/
 │   ├── types.ts                # wire types (mirrors Rust events/config)
 │   ├── styles.css              # design system + all component styles
 │   ├── hooks/
-│   │   └── useRunnerEvents.ts  # status / output / restarting subscriptions
+│   │   └── useRunnerEvents.ts  # runtime (status+ports, rehydrated via get_statuses), restarting
 │   └── components/
 │       ├── Sidebar.tsx         # project list + + New button
 │       ├── ProjectCard.tsx     # one project (name, status, action summary, trash)
@@ -95,11 +95,13 @@ VibeRunner/
 │   │   │                       # JSONC parse, TOML auto-discovery, atomic write
 │   │   ├── state.rs            # AppState (config + per-project handles)
 │   │   ├── events.rs           # typed Tauri events (project:* + config:reloaded)
-│   │   ├── commands.rs         # #[tauri::command] handlers
+│   │   ├── commands.rs         # #[tauri::command] handlers (thin)
+│   │   ├── lifecycle.rs        # spawn / monitor / stop supervisor / ports / restart
 │   │   ├── pty.rs              # portable-pty wrapper, .env auto-load
-│   │   ├── process.rs          # keystroke parser + process-tree kill
-│   │   ├── ports.rs            # lsof / netstat parsing
-│   │   ├── runner.rs           # RunnerHandle (status, I/O, restart count)
+│   │   ├── process.rs          # keystrokes + identity-checked ProcessTree
+│   │   ├── ports.rs            # lsof / netstat parsing, URL hints from output
+│   │   ├── artifacts.rs        # .msi/.exe/.dmg/.app/.AppImage discovery + ranking
+│   │   ├── runner.rs           # RunnerHandle (status, I/O, tree, restart count)
 │   │   └── watcher.rs          # file-system watcher with debounce
 │   ├── capabilities/default.json
 │   ├── icons/                  # generated from assets/icon-source.png
@@ -122,7 +124,7 @@ All commands are in `package.json`. Run with `pnpm <name>`.
 pnpm install            # JS deps
 pnpm tauri:info         # toolchain + package versions
 pnpm typecheck          # tsc --noEmit
-pnpm test:rust          # cargo test --lib (14 tests)
+pnpm test:rust          # cargo test --lib (incl. end-to-end lifecycle tests)
 pnpm test               # typecheck + test:rust
 pnpm clean              # remove frontend dist/ and temp build files
 pnpm clean:all          # remove dist/, src-tauri/target/, and generated schemas
@@ -226,9 +228,31 @@ their TOML. If you need a different shape:
   (`taskkill`, `netstat`, `cmd`). That's the "terminal keeps popping
   up" bug. Use `process::hidden_command()` (it applies
   `CREATE_NO_WINDOW`) for anything VibeRunner spawns on the user's
-  behalf. `kill_pids` also only signals tree *roots* on Windows,
-  because `taskkill /T` already covers descendants — one spawn per
-  root, not one per process.
+  behalf. (Killing no longer spawns anything: `ProcessTree::kill`
+  signals processes directly through `sysinfo`.)
+- **Never match processes by path, and never trust a bare PID.** A
+  project's processes are exactly its `ProcessTree`: the PTY child plus
+  descendants adopted by (pid, start time), with dead entries pruned.
+  Matching "cwd or command line contains the project path" used to make
+  Stop kill VS Code / terminals and showed their ports as the
+  project's; reusing stale PIDs made runs hang in Running/Stopping and
+  made Stop `taskkill /T /F` recycled PIDs. PID files are only adopted
+  if written after the run started *and* the process started after it.
+- **Status has two owners.** The run's monitor thread finalizes natural
+  exits (exit 0 → Stopped, else Crashed); once the user clicks Stop,
+  the stop supervisor owns the run and always reaches Stopped (after
+  terminate → kill → a hard deadline). Both go through
+  `RunnerHandle::finish`, which rejects stale generations — use it,
+  don't `set_status` a final state directly.
+- **Ports come from the tree, plus URL hints.** `project:ports` is
+  emitted only by the port poller: listeners owned by the tree, plus
+  `http://localhost:N` / "on port N" from the run's output while
+  something accepts connections there. Auto-open fires once per run,
+  only for the primary action.
+- **Windows test binaries need the app manifest.** `build.rs` embeds
+  `windows-app-manifest.xml` via the linker for every target (instead of
+  tauri-build's resource) so Tauri's mock runtime loads in
+  `cargo test`; without it tests die with `STATUS_ENTRYPOINT_NOT_FOUND`.
 - **`powershell.exe -File` rejects forward slashes.** A command like
   `-File "./scripts/run.ps1"` dies with *"Illegal characters in
   path"* before the script opens. Use `-File ".\scripts\run.ps1"`.
@@ -246,18 +270,20 @@ their TOML. If you need a different shape:
 - **The `project:output` event payload is a JSON array of byte numbers.**
   Convert to `Uint8Array` on the frontend before writing to xterm.js.
   See `LogViewer.tsx`.
-- **Watch out for `RunnerHandle` field access.** `status`, `pid`, `writer`,
-  etc. are private. Use the provided accessors (`set_status`, `send_input`,
-  `take_writer`, etc.) or add a new one.
+- **Watch out for `RunnerHandle` field access.** `status`, `tree`, `writer`,
+  etc. are private. Use the provided accessors (`try_begin`, `finish`,
+  `with_tree`, `send_input`, `write_raw`, etc.) or add a new one.
 - **The file watcher ignores self-writes** via a 1-second skip flag. If
   you add a new write path, set `watcher::skip_next_change()` before
   the write.
 - **Detached / backgrounded processes (e.g. `nohup ... &`) exit the
   PTY quickly.** If the action is marked `detached: true`,
-  VibeRunner tracks the whole process tree rooted at the PTY's
-  PID and keeps the project "Running" as long as any descendant
-  is alive. Without that flag, the project goes "stopped" the
-  moment the launcher returns even if the app is still alive.
+  VibeRunner keeps the project "Running" as long as anything in its
+  process tree is alive. Without the flag, a launcher that exits 0 is
+  still treated as having started a daemon if a surviving process
+  listens on a TCP port or wrote a fresh PID file; otherwise the run
+  is Stopped (leftover toolchain helpers like `mspdbsrv.exe` don't
+  keep a finished Build "running").
 - **`.env` is loaded from the project root automatically.** The values
   go into the spawned PTY's environment. If your script also loads
   `.env` (e.g. via `dotenv` or by sourcing it), the values are
@@ -276,7 +302,9 @@ their TOML. If you need a different shape:
 | The action buttons / log / ports | `src/components/ProjectDetail.tsx` |
 | What the log viewer shows | `src/components/LogViewer.tsx` |
 | How ports are detected | `src-tauri/src/ports.rs`, `src/components/PortList.tsx` |
-| How processes are killed | `src-tauri/src/process.rs` (`kill_tree`) |
+| How processes are tracked / killed | `src-tauri/src/process.rs` (`ProcessTree`), `src-tauri/src/lifecycle.rs` (`supervise_stop`) |
+| Run status transitions | `src-tauri/src/lifecycle.rs`, `src-tauri/src/runner.rs` (`finish`) |
+| Install / Run Portable discovery | `src-tauri/src/artifacts.rs` |
 | How `.env` is auto-loaded | `src-tauri/src/pty.rs` (`spawn`) |
 | How TOML is read from each project | `src-tauri/src/config.rs` (`read_toml_environment`, `resolve_project`) |
 | What events exist | `src-tauri/src/events.rs` (Rust), `src/types.ts` (TS) |

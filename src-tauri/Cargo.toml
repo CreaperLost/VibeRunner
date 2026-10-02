@@ -45,6 +45,10 @@ toml = "0.8"
 # the spawned PTY.
 dotenvy = "0.15"
 
+[dev-dependencies]
+# Mock runtime, so lifecycle tests can drive real processes without a window.
+tauri = { version = "2", features = ["test"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

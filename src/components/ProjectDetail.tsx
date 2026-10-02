@@ -1,594 +1,453 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ArtifactsScan,
   ProjectArtifact,
-  ProjectStatus,
+  ProjectRuntime,
   ResolvedAction,
   ResolvedProject,
-  VibeConfigReloadedPayload,
 } from "../types";
 import { StatusPill } from "./StatusPill";
 import { LogViewer, type LogViewerHandle } from "./LogViewer";
 import { PortList } from "./PortList";
+import { Icon, actionIcon } from "./Icon";
+import { Avatar } from "./ProjectCard";
 import { useProjectRestarting } from "../hooks/useRunnerEvents";
-import { openBrowserUrl, openLocalPath, visibleProjectWarnings } from "../utils";
+import { usePersistentState } from "../hooks/usePersistentState";
+import {
+  buildAction,
+  errorText,
+  formatBytes,
+  isActiveStatus,
+  openBrowserUrl,
+  openLocalPath,
+  revealLocalPath,
+  setupAction,
+  stopAction,
+  visibleProjectWarnings,
+} from "../utils";
 
 interface ProjectDetailProps {
   project: ResolvedProject | null;
-  status: ProjectStatus;
-  currentAction: string | null;
-  /** Currently-detected listening ports for the selected project. */
-  detectedPorts: number[];
+  runtime: ProjectRuntime;
   pending: boolean;
   onRunAction: (projectId: string, actionName: string) => void;
   onSetup: (projectId: string) => void;
-  onBuild?: (projectId: string) => void;
+  onBuild: (projectId: string) => void;
   onStop: (projectId: string) => void;
   onRestart: (projectId: string) => void;
+  onError: (msg: string) => void;
 }
 
-/** Map an icon string from the TOML/action config to a unicode glyph. */
-function iconGlyph(icon: string | null | undefined): string {
-  switch (icon) {
-    case "run":
-      return "▶";
-    case "stop":
-      return "■";
-    case "tool":
-    case "setup":
-      return "🔧";
-    case "build":
-      return "🛠";
-    case "test":
-      return "✓";
-    case "migrate":
-      return "↷";
-    default:
-      return "•";
+type Tab = "logs" | "ports" | "details";
+
+/** Runs whose app was already auto-opened (`id:startedAtMs`). Module
+ *  level so switching projects back and forth doesn't re-open tabs. */
+const autoOpenedRuns = new Set<string>();
+
+/**
+ * Right-hand panel. The wrapper only decides between the empty state
+ * and the real view; the real view is keyed by project id, so every
+ * hook runs unconditionally and per-project state resets on switch.
+ * (Returning early before hooks crashed React when the last project
+ * was removed.)
+ */
+export function ProjectDetail(props: ProjectDetailProps) {
+  if (!props.project) {
+    return (
+      <section className="detail detail--empty">
+        <div className="detail__empty-msg">
+          <Icon name="terminal" size={28} />
+          <p>Select a project to see its actions and logs.</p>
+        </div>
+      </section>
+    );
   }
+  return <ProjectView key={props.project.id} {...props} project={props.project} />;
 }
 
-export function ProjectDetail({
+function ProjectView({
   project,
-  status,
-  currentAction,
-  detectedPorts,
+  runtime,
   pending,
   onRunAction,
   onSetup,
   onBuild,
   onStop,
   onRestart,
-}: ProjectDetailProps) {
-  if (!project) {
-    return (
-      <section className="detail detail--empty">
-        <div className="detail__empty-msg">
-          <p>Select a project to see its details.</p>
-        </div>
-      </section>
-    );
-  }
-
-  const isActive =
-    status === "running" || status === "starting" || status === "stopping";
+  onError,
+}: ProjectDetailProps & { project: ResolvedProject }) {
+  const { status, ports } = runtime;
+  const isActive = isActiveStatus(status);
   const isCrashed = status === "crashed";
   const warnings = visibleProjectWarnings(project.warnings);
-  const canRunAction = !pending && !isActive;
-  const canStop = !pending && (isActive || isCrashed);
-  const canRestart = !pending;
+  const canRun = !pending && !isActive;
 
-  // The implicit "Setup" action is the first one with name "Setup".
-  const setupAction = project.actions.find((a) => a.name === "Setup") ?? null;
-  // The "Build" action if configured or present.
-  const buildAction =
-    project.actions.find(
-      (a) =>
-        (a.name.toLowerCase() === "build" || a.icon === "build") &&
-        a.name !== "Setup"
-    ) ?? null;
-  // User-defined actions: everything except the implicit Setup, Build, and Stop (which have their own dedicated buttons).
-  const userActions = project.actions.filter(
-    (a) =>
-      a.name !== "Setup" &&
-      a.name.toLowerCase() !== "build" &&
-      a.icon !== "build" &&
-      a.name.toLowerCase() !== "stop" &&
-      a.icon !== "stop"
-  );
-  const hasRestart = project.primaryAction !== null;
+  const setup = setupAction(project);
+  const build = buildAction(project);
+  const stop = stopAction(project);
+  const primary = project.actions.find((a) => a.name === project.primaryAction) ?? null;
+  const special = new Set([setup?.name, build?.name, stop?.name, primary?.name]);
+  const others = project.actions.filter((a) => !special.has(a.name));
+  const appPort = ports[0] ?? null;
 
-  const primaryPort = detectedPorts.length > 0 ? Math.min(...detectedPorts) : null;
-  const [autoOpen, setAutoOpen] = useState(() => {
-    return localStorage.getItem("viberunner_auto_open") !== "false";
-  });
-  const autoOpenedRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    localStorage.setItem("viberunner_auto_open", String(autoOpen));
-  }, [autoOpen]);
-
-  // Auto-open in browser when the port is detected and the app is active
-  useEffect(() => {
-    if (!autoOpen || !primaryPort || !isActive) {
-      if (!isActive) {
-        autoOpenedRef.current = null;
-      }
-      return;
-    }
-    const key = `${project.id}:${primaryPort}`;
-    if (autoOpenedRef.current !== key) {
-      autoOpenedRef.current = key;
-      openBrowserUrl(`http://localhost:${primaryPort}`).catch((e) =>
-        console.error("auto openUrl failed", e)
-      );
-    }
-  }, [autoOpen, primaryPort, isActive, project.id]);
-
-  const [logExpanded, setLogExpanded] = useState(false);
+  const [tab, setTab] = usePersistentState<Tab>("viberunner.detail.tab", "logs");
+  const [logMax, setLogMax] = useState(false);
   const [copied, setCopied] = useState(false);
   const [isScrolledUp, setIsScrolledUp] = useState(false);
-  const logActionsRef = useRef<LogViewerHandle | null>(null);
+  const logRef = useRef<LogViewerHandle | null>(null);
 
-  // Auto-discovered build artifacts (.dmg, .app, .exe, ...). Scanned
-  // on mount + whenever the project path changes or the user clicks
-  // Refresh. Used to surface "Install" and "Run Portable" buttons
-  // alongside the TOML-defined actions.
+  // ---- auto-open -----------------------------------------------------------
+  // Only for the primary (Run) action, once per run. Build/Setup runs
+  // and port changes mid-run never open a browser tab.
+  const [autoOpen, setAutoOpen] = usePersistentState<boolean>("viberunner.autoOpen", true);
+  useEffect(() => {
+    if (!autoOpen || status !== "running" || !appPort || !runtime.startedAtMs) return;
+    if (!primary || runtime.action !== primary.name) return;
+    const key = `${project.id}:${runtime.startedAtMs}`;
+    if (autoOpenedRuns.has(key)) return;
+    autoOpenedRuns.add(key);
+    openBrowserUrl(`http://localhost:${appPort}`).catch((e) => console.error("auto-open failed", e));
+  }, [autoOpen, status, appPort, runtime.startedAtMs, runtime.action, primary, project.id]);
+
+  // ---- artifacts -------------------------------------------------------------
   const [scan, setScan] = useState<ArtifactsScan | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const scanSeqRef = useRef(0);
-
-  const runScan = async (path: string) => {
-    const seq = ++scanSeqRef.current;
+  const scanSeq = useRef(0);
+  const runScan = useCallback(async () => {
+    const seq = ++scanSeq.current;
     setScanning(true);
-    setScanError(null);
     try {
-      const result = await invoke<ArtifactsScan>("scan_project_artifacts", { path });
-      if (seq !== scanSeqRef.current) return; // a newer scan superseded us
-      setScan(result);
-    } catch (e) {
-      if (seq !== scanSeqRef.current) return;
-      setScanError(typeof e === "string" ? e : String(e));
-      setScan(null);
+      const result = await invoke<ArtifactsScan>("scan_project_artifacts", { path: project.path });
+      if (seq === scanSeq.current) setScan(result);
+    } catch {
+      if (seq === scanSeq.current) setScan(null);
     } finally {
-      if (seq === scanSeqRef.current) setScanning(false);
+      if (seq === scanSeq.current) setScanning(false);
     }
-  };
+  }, [project.path]);
 
-  // Scan whenever the selected project (path) changes. This is also
-  // the "refresh on select" behavior; the user can force a fresh
-  // scan via the Refresh button after a Build completes.
   useEffect(() => {
-    if (project) runScan(project.path);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.path]);
+    runScan();
+  }, [runScan]);
 
-  // After a build, re-scan so a freshly produced .app / .dmg shows
-  // up without a manual refresh. We detect "build finished" by
-  // watching `pending`: it flips true → false around a build.
-  const prevPendingRef = useRef(pending);
+  // Re-scan when a run finishes (a Build/Package just produced files).
+  const wasActive = useRef(isActive);
   useEffect(() => {
-    if (prevPendingRef.current && !pending && project) {
-      runScan(project.path);
-    }
-    prevPendingRef.current = pending;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pending]);
+    if (wasActive.current && !isActive) runScan();
+    wasActive.current = isActive;
+  }, [isActive, runScan]);
 
-  // Re-scan whenever the global config is reloaded. Covers:
-  //   - the header "↻ Reload" button (calls reload_config in App.tsx,
-  //     which emits config:reloaded),
-  //   - the file-watcher auto-reload on edits to vibe.config.json,
-  //   - any add/remove project operation.
-  // Subscribed once with a ref so the listener survives project
-  // changes without re-subscribing.
-  const projectForReloadRef = useRef(project);
-  useEffect(() => {
-    projectForReloadRef.current = project;
-  }, [project]);
+  // …and on config reloads (Reload button, file watcher, add/remove).
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
     let cancelled = false;
-    (async () => {
-      const u = await listen<VibeConfigReloadedPayload>(
-        "config:reloaded",
-        () => {
-          if (cancelled) return;
-          const cur = projectForReloadRef.current;
-          if (cur) runScan(cur.path);
-        }
-      );
-      if (cancelled) {
-        u();
-        return;
-      }
-      unlisten = u;
-    })();
+    listen("config:reloaded", () => runScan()).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      unlisten?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [runScan]);
 
-  const handleCopyLogs = async () => {
-    if (logActionsRef.current) {
-      const ok = await logActionsRef.current.copyLogs();
-      if (ok) {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }
+  const openArtifact = async (a: ProjectArtifact) => {
+    try {
+      await openLocalPath(a.path);
+    } catch (e) {
+      onError(`Could not open ${a.displayName}: ${errorText(e)}`);
     }
   };
 
-  const handleOpenBrowser = async () => {
-    if (primaryPort) {
-      await openBrowserUrl(`http://localhost:${primaryPort}`);
-      return;
+  const openApp = async () => {
+    let port = appPort;
+    if (!port) {
+      const guess = project.env?.["PORT"] || project.env?.["VITE_PORT"] || "3000";
+      const answer = window.prompt("No listening port detected yet.\nLocalhost port to open:", guess);
+      const n = answer ? parseInt(answer.trim(), 10) : NaN;
+      if (!(n > 0 && n <= 65535)) return;
+      port = n;
     }
+    openBrowserUrl(`http://localhost:${port}`).catch((e) => onError(errorText(e)));
+  };
 
-    const candidatePort =
-      project.env?.["PORT"] ||
-      project.env?.["VITE_PORT"] ||
-      (detectedPorts.length > 0 ? String(detectedPorts[0]) : "3000");
-
-
-    const answer = window.prompt(
-      `No listening port detected automatically yet.\nEnter localhost port to open:`,
-      candidatePort
-    );
-    if (answer && answer.trim()) {
-      const portNum = parseInt(answer.trim(), 10);
-      if (!isNaN(portNum) && portNum > 0 && portNum <= 65535) {
-        await openBrowserUrl(`http://localhost:${portNum}`);
-      }
+  const copyLogs = async () => {
+    if (await logRef.current?.copyLogs()) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
     }
   };
+
+  const reveal = () =>
+    revealLocalPath(project.path).catch((e) => onError(`Could not reveal ${project.path}: ${errorText(e)}`));
+
+  const actionButton = (a: ResolvedAction, onClick: () => void, variant = "") => (
+    <button
+      key={a.name}
+      type="button"
+      className={`btn ${variant}`}
+      onClick={onClick}
+      disabled={!canRun}
+      title={a.command}
+    >
+      <Icon name={actionIcon(a.icon)} size={14} />
+      {a.name}
+    </button>
+  );
 
   return (
-    <section className="detail">
+    <section className={`detail${logMax ? " detail--log-max" : ""}`}>
       <header className="detail__header">
-        <div>
-          <h2 className="detail__title">{project.name}</h2>
-          <p className="detail__id">
-            id: {project.id} ·{" "}
-            <span className="detail__source">
-              {project.source === "toml"
-                ? "auto (TOML)"
-                : project.source === "manual"
-                  ? "manual"
-                  : "empty"}
-            </span>
-          </p>
+        <div className="detail__title-row">
+          <Avatar id={project.id} name={project.name} size="lg" />
+          <div className="detail__title-text">
+            <h2 className="detail__title">{project.name}</h2>
+            <div className="detail__subtitle">
+              <button type="button" className="detail__path" onClick={reveal} title="Show in file manager">
+                <Icon name="folder" size={12} />
+                <span>{project.path}</span>
+              </button>
+              <span className={`badge badge--${project.source}`}>
+                {project.source === "toml" ? "TOML" : project.source === "manual" ? "Manual" : "Empty"}
+              </span>
+            </div>
+          </div>
+          <StatusPill
+            status={status}
+            action={runtime.action}
+            reason={runtime.reason}
+            startedAtMs={runtime.startedAtMs}
+            size="md"
+          />
         </div>
-        <div className="detail__status">
-          <StatusPill status={status} action={currentAction} size="md" />
+
+        <div className="toolbar" role="toolbar" aria-label="Project actions">
+          <div className="toolbar__group">
+            {primary && actionButton(primary, () => onRunAction(project.id, primary.name), "btn--primary")}
+            <button
+              type="button"
+              className={`btn ${isCrashed ? "btn--warning" : isActive ? "btn--danger" : ""}`}
+              onClick={() => onStop(project.id)}
+              disabled={pending || !(isActive || isCrashed) || status === "stopping"}
+              title={
+                isCrashed
+                  ? "Clean up leftovers of the crashed run (runs the stop script, kills remaining processes)"
+                  : stop
+                    ? `Stop (${stop.command})`
+                    : "Stop (Ctrl+C, then terminate the process tree)"
+              }
+            >
+              <Icon name="stop" size={13} />
+              {isCrashed ? "Clean up" : "Stop"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => onRestart(project.id)}
+              disabled={pending || !primary || status === "stopping"}
+              title={primary ? `Stop, run Setup if any, then "${primary.name}"` : "No primary action to restart"}
+            >
+              <Icon name="restart" size={14} />
+              Restart
+            </button>
+          </div>
+
+          {(setup || build || others.length > 0) && (
+            <div className="toolbar__group">
+              {setup && actionButton(setup, () => onSetup(project.id))}
+              {build && actionButton(build, () => onBuild(project.id))}
+              {others.map((a) => actionButton(a, () => onRunAction(project.id, a.name)))}
+            </div>
+          )}
+
+          <div className="toolbar__spacer" />
+
+          <div className="toolbar__group">
+            <button
+              type="button"
+              className={`btn ${appPort ? "btn--accent" : ""}`}
+              onClick={openApp}
+              title={appPort ? `Open http://localhost:${appPort}` : "Open a localhost port in your browser"}
+            >
+              <Icon name="globe" size={14} />
+              {appPort ? `localhost:${appPort}` : "Open app"}
+            </button>
+            <label className="switch" title="Open the app in your browser once, when Run first reports its URL">
+              <input type="checkbox" checked={autoOpen} onChange={(e) => setAutoOpen(e.target.checked)} />
+              <span className="switch__track" />
+              <span className="switch__label">Auto-open</span>
+            </label>
+          </div>
         </div>
+
+        {warnings.length > 0 && (
+          <div className="callout callout--warning" role="alert">
+            <Icon name="alert" size={14} />
+            <div>
+              {warnings.map((w, i) => (
+                <div key={i}>{w}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <RestartBanner projectId={project.id} />
+
+        <ArtifactsBar scan={scan} scanning={scanning} onRefresh={runScan} onOpen={openArtifact} />
       </header>
 
-      {warnings.length > 0 && (
-        <div className="detail__warnings" role="alert">
-          {warnings.map((w, i) => (
-            <div key={i}>⚠ {w}</div>
-          ))}
-        </div>
-      )}
-
-      <ArtifactsSection
-        scan={scan}
-        scanning={scanning}
-        scanError={scanError}
-        onRefresh={() => runScan(project.path)}
-        openArtifact={async (artifact) => {
-          // Use openLocalPath → backend open_path command, which
-          // dispatches to the OS default handler (macOS `open`,
-          // Windows ShellExecute, Linux xdg-open). For .dmg this
-          // mounts + opens Finder; for .app it launches the bundle;
-          // for .exe / .AppImage it runs them.
-          await openLocalPath(artifact.path);
-        }}
-      />
-
-      <div className="detail__actions">
-        {setupAction && (
-          <ActionButton
-            action={setupAction}
-            disabled={!canRunAction}
-            title="Run the project's setup script"
-            onClick={() => onSetup(project.id)}
-          />
-        )}
-        {buildAction && (
-          <ActionButton
-            action={buildAction}
-            disabled={!canRunAction}
-            title={`Run build (${buildAction.command})`}
-            onClick={() =>
-              onBuild
-                ? onBuild(project.id)
-                : onRunAction(project.id, buildAction.name)
-            }
-          />
-        )}
-        {userActions.map((a) => (
-          <ActionButton
-            key={a.name}
-            action={a}
-            disabled={pending || isActive}
-            title={a.command}
-            onClick={() => onRunAction(project.id, a.name)}
-          />
+      <nav className="tabs" role="tablist">
+        {(
+          [
+            ["logs", "Logs", "terminal"],
+            ["ports", `Ports${ports.length ? ` · ${ports.length}` : ""}`, "plug"],
+            ["details", "Details", "info"],
+          ] as const
+        ).map(([id, label, icon]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            className={`tabs__tab${tab === id ? " tabs__tab--active" : ""}`}
+            onClick={() => setTab(id)}
+          >
+            <Icon name={icon} size={14} />
+            {label}
+          </button>
         ))}
-        <button
-          type="button"
-          className={`btn ${isCrashed ? "btn--warning" : ""}`}
-          onClick={() => onStop(project.id)}
-          disabled={!canStop}
-          title={
-            isCrashed
-              ? "Clean up crashed application (runs stop script and terminates remaining processes)"
-              : "Stop the project (runs stop script or terminates processes)"
-          }
-        >
-          ■ {isCrashed ? "Stop (Cleanup)" : "Stop"}
-        </button>
-        <button
-          type="button"
-          className="btn"
-          onClick={() => onRestart(project.id)}
-          disabled={!canRestart || !hasRestart}
-          title={
-            hasRestart
-              ? `Stop, then run "${project.primaryAction}"`
-              : "No primary action configured for Restart"
-          }
-        >
-          ↻ Restart
-        </button>
-        <button
-          type="button"
-          className={`btn ${primaryPort ? "btn--accent" : ""}`}
-          onClick={handleOpenBrowser}
-          title={
-            primaryPort
-              ? `Open http://localhost:${primaryPort} in your default browser`
-              : isActive
-                ? "Click to open custom or default localhost port"
-                : "Start project or click to open localhost in browser"
-          }
-        >
-          🌐 {primaryPort ? `Open App (:${primaryPort})` : "Open App"}
-        </button>
+        {tab === "logs" && (
+          <div className="tabs__tools">
+            <button
+              type="button"
+              className={`icon-btn${isScrolledUp ? " icon-btn--active" : ""}`}
+              onClick={() => logRef.current?.scrollToBottom()}
+              title={isScrolledUp ? "Jump to live output" : "Following live output"}
+            >
+              <Icon name="arrowDown" size={14} />
+            </button>
+            <button type="button" className="icon-btn" onClick={copyLogs} title="Copy logs">
+              <Icon name={copied ? "check" : "copy"} size={14} />
+            </button>
+            <button type="button" className="icon-btn" onClick={() => logRef.current?.clear()} title="Clear logs">
+              <Icon name="eraser" size={14} />
+            </button>
+            <button
+              type="button"
+              className={`icon-btn${logMax ? " icon-btn--active" : ""}`}
+              onClick={() => setLogMax((v) => !v)}
+              title={logMax ? "Restore layout" : "Maximize logs"}
+            >
+              <Icon name={logMax ? "minimize" : "maximize"} size={14} />
+            </button>
+          </div>
+        )}
+      </nav>
 
-
-        <label
-          className="detail__auto-open-toggle"
-          title="Automatically open the app in your browser once its port is detected"
-        >
-          <input
-            type="checkbox"
-            checked={autoOpen}
-            onChange={(e) => setAutoOpen(e.target.checked)}
+      <div className="detail__panel" role="tabpanel">
+        {/* Kept mounted so the terminal keeps its scrollback while other tabs are open. */}
+        <div className={`detail__logs${tab === "logs" ? "" : " is-hidden"}`}>
+          <LogViewer
+            projectId={project.id}
+            expanded={logMax || tab === "logs"}
+            onActionsReady={(a) => {
+              logRef.current = a;
+            }}
+            onScrolledUpChange={setIsScrolledUp}
           />
-          <span>Auto-open</span>
-        </label>
-      </div>
-
-      <OpenSiteBar
-        detectedPorts={detectedPorts}
-        onOpen={(port) =>
-          openBrowserUrl(`http://localhost:${port}`).catch((e) =>
-            console.error("openUrl failed", e)
-          )
-        }
-      />
-
-      <RestartBanner projectId={project.id} />
-
-      <dl className="detail__config">
-        <div className="detail__row">
-          <dt>Path</dt>
-          <dd>
-            <code>{project.path}</code>
-          </dd>
         </div>
-        {project.autoRestart?.enabled && (
-          <div className="detail__row">
-            <dt>Auto-restart</dt>
-            <dd>
-              up to <strong>{project.autoRestart.maxRetries}</strong> time
-              {project.autoRestart.maxRetries === 1 ? "" : "s"}, delay{" "}
-              <strong>{project.autoRestart.delayMs}ms</strong> between attempts
-            </dd>
+        {tab === "ports" && (
+          <div className="detail__scroll">
+            <PortList ports={ports} active={isActive} />
           </div>
         )}
-        {project.actions.length > 0 && (
-          <div className="detail__row">
-            <dt>Actions</dt>
-            <dd>
-              <table className="env-table">
-                <tbody>
-                  {project.actions.map((a) => (
-                    <tr key={a.name}>
-                      <td>
-                        <code>{a.name}</code>
-                      </td>
-                      <td>
-                        <code>{a.command}</code>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </dd>
+        {tab === "details" && (
+          <div className="detail__scroll">
+            <DetailsTable project={project} />
           </div>
         )}
-      </dl>
-
-      <section className="detail__panel">
-        <header className="detail__panel-header">
-          <div>
-            <h3>Logs</h3>
-            <span className="detail__panel-hint">
-              live PTY · click to type input
-            </span>
-          </div>
-          <div className="log-panel__controls">
-            <button
-              type="button"
-              className={`btn btn--tiny${isScrolledUp ? " btn--active" : ""}`}
-              onClick={() => logActionsRef.current?.scrollToBottom()}
-              title={isScrolledUp ? "Jump to live bottom" : "At bottom"}
-            >
-              ↓ Bottom{isScrolledUp ? " •" : ""}
-            </button>
-            <button
-              type="button"
-              className="btn btn--tiny"
-              onClick={handleCopyLogs}
-              title="Copy terminal logs to clipboard"
-            >
-              {copied ? "✓ Copied" : "📋 Copy"}
-            </button>
-            <button
-              type="button"
-              className="btn btn--tiny"
-              onClick={() => logActionsRef.current?.clear()}
-              title="Clear terminal output"
-            >
-              ⊘ Clear
-            </button>
-            <button
-              type="button"
-              className={`btn btn--tiny${logExpanded ? " btn--active" : ""}`}
-              onClick={() => setLogExpanded((e) => !e)}
-              title={logExpanded ? "Collapse log viewer" : "Expand log viewer"}
-            >
-              {logExpanded ? "⤓ Normal" : "⤒ Expand"}
-            </button>
-          </div>
-        </header>
-        <LogViewer
-          projectId={project.id}
-          expanded={logExpanded}
-          onActionsReady={(actions) => {
-            logActionsRef.current = actions;
-          }}
-          onScrolledUpChange={setIsScrolledUp}
-        />
-      </section>
-
-      <section id="ports-panel" className="detail__panel">
-        <header className="detail__panel-header">
-          <h3>Ports</h3>
-          <span className="detail__panel-hint">
-            detected listeners · click to open
-          </span>
-        </header>
-        <PortList projectId={project.id} ports={detectedPorts} />
-      </section>
+      </div>
     </section>
   );
 }
 
-interface ActionButtonProps {
-  action: ResolvedAction;
-  disabled: boolean;
-  title: string;
-  onClick: () => void;
-}
-
-function ActionButton({ action, disabled, title, onClick }: ActionButtonProps) {
-  const isPrimary = action.icon === "run" || action.name.toLowerCase() === "run";
+function DetailsTable({ project }: { project: ResolvedProject }) {
+  const envKeys = Object.keys(project.env ?? {});
   return (
-    <button
-      type="button"
-      className={`btn ${isPrimary ? "btn--primary" : ""}`}
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-    >
-      <span className="btn__icon">{iconGlyph(action.icon)}</span> {action.name}
-    </button>
-  );
-}
-
-/**
- * Prominent "Open site" bar. Enabled when at least one port has
- * been detected; clicking it opens the lowest-numbered port in the
- * user's default browser (via `tauri-plugin-opener`'s `openUrl`).
- *
- * The "lowest port" heuristic picks the main app when a project
- * opens multiple ports (e.g. 5173 for Vite + 8000 for an API):
- * the smaller port is usually the user-facing one.
- */
-function OpenSiteBar({
-  detectedPorts,
-  onOpen,
-}: {
-  detectedPorts: number[];
-  onOpen: (port: number) => void;
-}) {
-  if (detectedPorts.length === 0) {
-    return (
-      <div className="detail__open-site detail__open-site--empty">
-        <span className="detail__open-site-label">🌐</span>
-        <span className="detail__open-site-hint">
-          No listening port detected yet. Once the app is up, open it
-          here.
-        </span>
-      </div>
-    );
-  }
-  const primary = Math.min(...detectedPorts);
-  const extra = detectedPorts.length - 1;
-  return (
-    <div className="detail__open-site">
-      <button
-        type="button"
-        className="btn btn--accent"
-        onClick={() => onOpen(primary)}
-        title={`Open http://localhost:${primary} in your default browser`}
-      >
-        🌐 Open site · localhost:{primary}
-      </button>
-      {extra > 0 && (
-        <button
-          type="button"
-          className="detail__open-site-extras detail__open-site-extras-btn"
-          onClick={() => {
-            document.getElementById("ports-panel")?.scrollIntoView({ behavior: "smooth" });
-          }}
-          title="Scroll down to ports list"
-        >
-          +{extra} other port{extra === 1 ? "" : "s"} (see below ↓)
-        </button>
+    <dl className="kv">
+      <dt>Path</dt>
+      <dd>
+        <code>{project.path}</code>
+      </dd>
+      <dt>Source</dt>
+      <dd>
+        {project.source === "toml"
+          ? ".codex/environments/environment.toml"
+          : project.source === "manual"
+            ? "vibe.config.json (manual)"
+            : "no actions configured"}
+      </dd>
+      <dt>Restart runs</dt>
+      <dd>{project.primaryAction ?? "—"}</dd>
+      {project.autoRestart?.enabled && (
+        <>
+          <dt>Auto-restart</dt>
+          <dd>
+            up to {project.autoRestart.maxRetries}×, {project.autoRestart.delayMs} ms apart
+          </dd>
+        </>
       )}
-    </div>
+      {envKeys.length > 0 && (
+        <>
+          <dt>Env overrides</dt>
+          <dd>
+            <code>{envKeys.join(", ")}</code>
+          </dd>
+        </>
+      )}
+      {project.warnings.length > 0 && (
+        <>
+          <dt>Notes</dt>
+          <dd>
+            {project.warnings.map((w, i) => (
+              <div key={i}>{w}</div>
+            ))}
+          </dd>
+        </>
+      )}
+      <dt>Actions</dt>
+      <dd>
+        <table className="actions-table">
+          <tbody>
+            {project.actions.map((a) => (
+              <tr key={a.name}>
+                <td className="actions-table__name">
+                  <Icon name={actionIcon(a.icon)} size={13} />
+                  {a.name}
+                  {a.detached && <span className="badge">detached</span>}
+                </td>
+                <td>
+                  <code>{a.command}</code>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </dd>
+    </dl>
   );
 }
 
-/**
- * Transient banner shown briefly when the backend signals an
- * auto-restart. Auto-clears after the configured delay so it doesn't
- * linger once the new process is up.
- */
+/** Transient banner while an auto-restart is pending. */
 function RestartBanner({ projectId }: { projectId: string }) {
-  const [info, setInfo] = useState<{
-    attempt: number;
-    max: number;
-    delayMs: number;
-  } | null>(null);
-
-  useProjectRestarting(
-    projectId,
-    (attempt, max, delayMs) => {
-      setInfo({ attempt, max, delayMs });
-    }
+  const [info, setInfo] = useState<{ attempt: number; max: number; delayMs: number } | null>(null);
+  const onRestarting = useCallback(
+    (attempt: number, max: number, delayMs: number) => setInfo({ attempt, max, delayMs }),
+    []
   );
+  useProjectRestarting(projectId, onRestarting);
 
   useEffect(() => {
     if (!info) return;
@@ -598,128 +457,79 @@ function RestartBanner({ projectId }: { projectId: string }) {
 
   if (!info) return null;
   return (
-    <div className="detail__restart-banner" role="status">
-      <span className="detail__restart-icon">↻</span>
-      Crashed — auto-restarting in {(info.delayMs / 1000).toFixed(1)}s
-      (attempt {info.attempt}/{info.max})…
+    <div className="callout callout--info" role="status">
+      <Icon name="restart" size={14} />
+      Crashed — auto-restarting in {(info.delayMs / 1000).toFixed(1)}s (attempt {info.attempt}/{info.max})
     </div>
   );
 }
 
 /**
- * Auto-discovered build artifacts section.
- *
- * Shows an "Install" button when an installable artifact is found
- * (`.dmg` on mac, `.msi` on Windows, `.deb` / `.rpm` on Linux) and a
- * "Run Portable" button when a portable one is (`.app`, `.exe`,
- * `.AppImage`). Hides entirely when neither is found so it doesn't
- * add visual noise to projects without builds.
- *
- * The Refresh button re-runs the scan. The parent already auto-scans
- * on selection + after a build completes; this is for manual
- * recovery (e.g., user ran a build outside of VibeRunner).
+ * Discovered build outputs: best installer + best runnable app, with
+ * runners-up in an overflow menu. Hidden when nothing was found.
  */
-function ArtifactsSection({
+function ArtifactsBar({
   scan,
   scanning,
-  scanError,
   onRefresh,
-  openArtifact,
+  onOpen,
 }: {
   scan: ArtifactsScan | null;
   scanning: boolean;
-  scanError: string | null;
   onRefresh: () => void;
-  openArtifact: (artifact: ProjectArtifact) => Promise<void>;
+  onOpen: (a: ProjectArtifact) => void;
 }) {
-  const hasAny = !!(scan?.install || scan?.portable);
-  // While the very first scan is in flight, render nothing — we
-  // don't want a flash of "no artifacts found" before the scan
-  // completes. After the first scan completes, render even if empty
-  // so the Refresh button is reachable.
-  if (scanning && !scan && !scanError) return null;
+  const [menuOpen, setMenuOpen] = useState(false);
+  if (!scan || (!scan.install && !scan.portable)) return null;
 
-  return (
-    <section className="detail__artifacts">
-      <header className="detail__artifacts-header">
-        <div className="detail__artifacts-title">
-          <span className="detail__artifacts-label">Discovered artifacts</span>
-          <span className="detail__artifacts-hint">
-            auto-scanned from the project folder
-          </span>
-        </div>
-        <button
-          type="button"
-          className="btn btn--tiny"
-          onClick={onRefresh}
-          disabled={scanning}
-          title="Re-parse the project folder and rescan for build artifacts"
-          aria-label="Refresh artifacts"
-        >
-          {scanning ? "…" : "↻ Refresh"}
-        </button>
-      </header>
-      <div className="detail__artifacts-body">
-        {scanError && (
-          <div className="detail__artifacts-error" role="alert">
-            ⚠ {scanError}
-          </div>
-        )}
-        {!scanError && !hasAny && (
-          <div className="detail__artifacts-empty">
-            No installable or portable artifacts found. Run{" "}
-            <code>Build .app</code> / <code>Build .dmg</code> first, or
-            drop a built artifact in the project folder.
-          </div>
-        )}
-        {scan?.install && (
-          <ArtifactButton
-            artifact={scan.install}
-            label="Install"
-            onClick={() => openArtifact(scan.install!)}
-          />
-        )}
-        {scan?.portable && (
-          <ArtifactButton
-            artifact={scan.portable}
-            label="Run Portable"
-            onClick={() => openArtifact(scan.portable!)}
-          />
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ArtifactButton({
-  artifact,
-  label,
-  onClick,
-}: {
-  artifact: ProjectArtifact;
-  label: string;
-  onClick: () => void;
-}) {
-  const sizeMb = (artifact.sizeBytes / (1024 * 1024)).toFixed(1);
-  const mtime = new Date(artifact.modifiedMs);
-  const dateLabel = mtime.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-  return (
+  const chip = (a: ProjectArtifact, label: string, icon: "download" | "play") => (
     <button
       type="button"
-      className="btn btn--accent detail__artifact-btn"
-      onClick={onClick}
-      title={`${artifact.path}\n${sizeMb} MB · ${dateLabel}`}
+      className="artifact"
+      onClick={() => onOpen(a)}
+      title={`${a.path}\n${formatBytes(a.sizeBytes)} · ${new Date(a.modifiedMs).toLocaleString()}`}
     >
-      <span className="detail__artifact-label">{label}</span>
-      <span className="detail__artifact-name" title={artifact.displayName}>
-        {artifact.displayName}
-      </span>
-      <span className="detail__artifact-meta">
-        {sizeMb} MB · {dateLabel}
+      <Icon name={icon} size={13} />
+      <span className="artifact__label">{label}</span>
+      <span className="artifact__name">{a.displayName}</span>
+      <span className="artifact__meta">
+        {formatBytes(a.sizeBytes)} · {new Date(a.modifiedMs).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
       </span>
     </button>
+  );
+
+  return (
+    <div className="artifacts">
+      <Icon name="package" size={14} className="artifacts__icon" />
+      {scan.install && chip(scan.install, "Install", "download")}
+      {scan.portable && chip(scan.portable, "Run", "play")}
+      {scan.others.length > 0 && (
+        <div className="menu">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setMenuOpen((v) => !v)}
+            onBlur={() => setTimeout(() => setMenuOpen(false), 150)}
+            title="Other build outputs"
+          >
+            <Icon name="chevronDown" size={14} />
+          </button>
+          {menuOpen && (
+            <div className="menu__list" role="menu">
+              {scan.others.map((a) => (
+                <button key={a.path} type="button" role="menuitem" className="menu__item" onClick={() => onOpen(a)}>
+                  <Icon name={a.kind === "install" ? "download" : "play"} size={13} />
+                  <span className="menu__item-name">{a.displayName}</span>
+                  <span className="menu__item-meta">{a.parent}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <button type="button" className="icon-btn" onClick={onRefresh} disabled={scanning} title="Rescan the project folder">
+        <Icon name="refresh" size={14} className={scanning ? "spin" : undefined} />
+      </button>
+    </div>
   );
 }

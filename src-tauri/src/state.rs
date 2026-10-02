@@ -83,6 +83,11 @@ impl AppState {
         self.projects.read().get(id).cloned()
     }
 
+    /// Every handle created this session.
+    pub fn all(&self) -> Vec<SharedRunner> {
+        self.projects.read().values().cloned().collect()
+    }
+
     /// Drop the handle for an id (used on remove_project, after stopping
     /// any running process). Idempotent.
     pub fn forget(&self, id: &str) {

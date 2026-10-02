@@ -82,6 +82,7 @@ export function LogViewer({
 }: LogViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const syncRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -91,7 +92,7 @@ export function LogViewer({
 
     const term = new Terminal({
       fontFamily:
-        '"SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+        '"JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
       fontSize: 12,
       lineHeight: 1.25,
       cursorBlink: false,
@@ -101,10 +102,12 @@ export function LogViewer({
       scrollOnUserInput: true,
       smoothScrollDuration: 0,
       theme: {
-        background: "#0f172a",
-        foreground: "#cbd5e1",
-        cursor: "#94a3b8",
-        selectionBackground: "#334155",
+        background: "#0b0d12",
+        foreground: "#d4d8e1",
+        cursor: "#8b93a7",
+        selectionBackground: "#2b3242",
+        black: "#1b1f2a",
+        brightBlack: "#5c6475",
       },
     });
 
@@ -114,6 +117,9 @@ export function LogViewer({
     term.open(container);
 
     let userScrolledUp = false;
+    // Set on unmount; deferred fit/sync callbacks must not touch a
+    // disposed terminal.
+    let disposed = false;
 
     // Track user scrolling: if user manually scrolls away from the bottom, pause auto-scroll
     const scrollSub = term.onScroll(() => {
@@ -163,7 +169,11 @@ export function LogViewer({
     });
 
     const syncPty = () => {
+      if (disposed) return;
       try {
+        // Release the pinned pixel height first, or fit() measures the
+        // old size and the terminal can never grow back.
+        container.style.height = "";
         fit.fit();
         // Exact pixel height sync: eliminates subpixel and fractional line remainder
         // so xterm's scrollbar and viewport scroll truly to the very last line.
@@ -190,6 +200,7 @@ export function LogViewer({
       }
     };
 
+    syncRef.current = syncPty;
     syncPty();
     requestAnimationFrame(() => syncPty());
     document.fonts?.ready?.then(() => syncPty());
@@ -284,20 +295,18 @@ export function LogViewer({
       scrollSub.dispose();
       sub.dispose();
       ro.disconnect();
-      term.dispose();
       fitRef.current = null;
+      syncRef.current = null;
+      disposed = true;
+      // Defer: xterm queues a zero-delay viewport sync on open() that
+      // throws if it runs after dispose (StrictMode mounts twice in dev).
+      setTimeout(() => term.dispose(), 0);
     };
   }, [projectId]);
 
-  // Re-fit and sync when expanded state toggles (after CSS transition completes)
+  // Re-fit and sync when the panel is shown / maximized.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        fitRef.current?.fit();
-      } catch {
-        // ignore
-      }
-    }, 220);
+    const timer = setTimeout(() => syncRef.current?.(), 60);
     return () => clearTimeout(timer);
   }, [expanded]);
 

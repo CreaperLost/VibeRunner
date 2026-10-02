@@ -1,133 +1,117 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  OutputPayload,
   PortsPayload,
-  ProjectStatus,
+  ProjectRuntime,
   RestartingPayload,
   StatusPayload,
+  StatusSnapshot,
 } from "../types";
 
+const IDLE: ProjectRuntime = {
+  status: "stopped",
+  action: null,
+  reason: null,
+  startedAtMs: null,
+  ports: [],
+};
+
+export function runtimeOf(map: Map<string, ProjectRuntime>, id: string | null): ProjectRuntime {
+  return (id && map.get(id)) || IDLE;
+}
+
 /**
- * Subscribes to `project:status` events and returns a Map<id, ProjectStatus>
- * that the UI can read directly. Updates flow only one way: from the
- * backend → into this hook → into React state.
- *
- * Also tracks the name of the action whose PTY is alive (e.g. "Run",
- * "Setup") so the detail view can label the status pill.
+ * Live runtime view of every project: status, current action, reason,
+ * start time and listening ports. Driven by `project:status` and
+ * `project:ports` events, and seeded from `get_statuses` on mount so a
+ * webview reload (or HMR) doesn't show running projects as stopped.
  */
-export function useProjectStatuses(): Map<string, ProjectStatus> {
-  const [statuses, setStatuses] = useState<Map<string, ProjectStatus>>(
-    () => new Map()
-  );
+export function useProjectRuntime(): Map<string, ProjectRuntime> {
+  const [runtime, setRuntime] = useState<Map<string, ProjectRuntime>>(() => new Map());
 
   useEffect(() => {
     const unlistens: UnlistenFn[] = [];
     let cancelled = false;
+    // Ids that received a live event before the snapshot arrived — the
+    // event is newer, so the snapshot must not overwrite it.
+    const touched = new Set<string>();
 
-    (async () => {
-      const setStatus = (id: string, status: ProjectStatus) => {
-        if (cancelled) return;
-        setStatuses((prev) => {
-          if (prev.get(id) === status) return prev;
-          const next = new Map(prev);
-          next.set(id, status);
-          return next;
-        });
-      };
-
-      unlistens.push(
-        await listen<StatusPayload>("project:status", (e) => {
-          setStatus(e.payload.id, e.payload.status);
-        })
-      );
-    })();
-
-    return () => {
-      cancelled = true;
-      unlistens.forEach((u) => u());
-    };
-  }, []);
-
-  return statuses;
-}
-
-/** Map of project_id → action_name of the currently-running action. */
-export function useCurrentActions(): Map<string, string> {
-  const [actions, setActions] = useState<Map<string, string>>(() => new Map());
-
-  useEffect(() => {
-    const unlistens: UnlistenFn[] = [];
-    let cancelled = false;
-
-    (async () => {
-      const setAction = (id: string, action: string | null) => {
-        if (cancelled) return;
-        setActions((prev) => {
-          const next = new Map(prev);
-          if (action) next.set(id, action);
-          else next.delete(id);
-          return next;
-        });
-      };
-
-      unlistens.push(
-        await listen<StatusPayload>("project:status", (e) => {
-          // Only track the action when the project is actively
-          // running/starting. Otherwise clear it.
-          const alive = e.payload.status === "running" || e.payload.status === "starting";
-          setAction(e.payload.id, alive ? e.payload.action ?? null : null);
-        })
-      );
-    })();
-
-    return () => {
-      cancelled = true;
-      unlistens.forEach((u) => u());
-    };
-  }, []);
-
-  return actions;
-}
-
-/**
- * Subscribes to `project:output` events for a specific project and
- * invokes `onChunk` with each raw byte chunk.
- */
-export function useProjectOutput(
-  projectId: string,
-  onChunk: (bytes: Uint8Array) => void
-): void {
-  useEffect(() => {
-    if (!projectId) return;
-    let unlisten: UnlistenFn | null = null;
-    let cancelled = false;
-
-    (async () => {
-      const u = await listen<OutputPayload>("project:output", (e) => {
-        if (cancelled) return;
-        if (e.payload.id === projectId) {
-          onChunk(new Uint8Array(e.payload.chunk));
-        }
+    const update = (id: string, patch: (cur: ProjectRuntime) => ProjectRuntime) => {
+      if (cancelled) return;
+      touched.add(id);
+      setRuntime((prev) => {
+        const cur = prev.get(id) ?? IDLE;
+        const next = patch(cur);
+        if (next === cur) return prev;
+        const map = new Map(prev);
+        map.set(id, next);
+        return map;
       });
-      if (cancelled) {
-        u();
-        return;
+    };
+
+    (async () => {
+      unlistens.push(
+        await listen<StatusPayload>("project:status", (e) => {
+          const p = e.payload;
+          update(p.id, (cur) => {
+            const active = p.status === "running" || p.status === "starting" || p.status === "stopping";
+            return {
+              status: p.status,
+              action: p.action ?? (active ? cur.action : null),
+              reason: p.reason ?? null,
+              startedAtMs: p.startedAtMs ?? (active ? cur.startedAtMs : null),
+              ports: active ? cur.ports : [],
+            };
+          });
+        })
+      );
+      unlistens.push(
+        await listen<PortsPayload>("project:ports", (e) => {
+          update(e.payload.id, (cur) => {
+            const same =
+              cur.ports.length === e.payload.ports.length &&
+              cur.ports.every((p, i) => p === e.payload.ports[i]);
+            return same ? cur : { ...cur, ports: e.payload.ports };
+          });
+        })
+      );
+
+      try {
+        const snaps = await invoke<StatusSnapshot[]>("get_statuses");
+        if (cancelled) return;
+        setRuntime((prev) => {
+          const map = new Map(prev);
+          for (const s of snaps) {
+            if (touched.has(s.id)) continue;
+            map.set(s.id, {
+              status: s.status,
+              action: s.action ?? null,
+              reason: s.reason ?? null,
+              startedAtMs: s.startedAtMs ?? null,
+              ports: s.ports,
+            });
+          }
+          return map;
+        });
+      } catch (e) {
+        console.error("get_statuses failed", e);
       }
-      unlisten = u;
     })();
 
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      unlistens.forEach((u) => u());
     };
-  }, [projectId, onChunk]);
+  }, []);
+
+  return runtime;
 }
 
 /**
- * One-shot subscription to `project:restarting` for the given project.
- * Used by the detail panel to show a transient "Restarting in Ns
- * (attempt x/y)…" banner.
+ * Subscription to `project:restarting` for one project. Used by the
+ * detail panel to show a transient "Restarting in Ns (attempt x/y)…"
+ * banner.
  */
 export function useProjectRestarting(
   projectId: string,
@@ -139,15 +123,12 @@ export function useProjectRestarting(
     let cancelled = false;
 
     (async () => {
-      const u = await listen<RestartingPayload>(
-        "project:restarting",
-        (e) => {
-          if (cancelled) return;
-          if (e.payload.id === projectId) {
-            onRestarting(e.payload.attempt, e.payload.max, e.payload.delayMs);
-          }
+      const u = await listen<RestartingPayload>("project:restarting", (e) => {
+        if (cancelled) return;
+        if (e.payload.id === projectId) {
+          onRestarting(e.payload.attempt, e.payload.max, e.payload.delayMs);
         }
-      );
+      });
       if (cancelled) {
         u();
         return;
@@ -162,58 +143,14 @@ export function useProjectRestarting(
   }, [projectId, onRestarting]);
 }
 
-/** Map of project_id → currently-detected listening ports. */
-export function useProjectPorts(): Map<string, number[]> {
-  const [ports, setPorts] = useState<Map<string, number[]>>(() => new Map());
-
+/** Ticking "now" for elapsed-time displays. Only ticks while `enabled`. */
+export function useNow(enabled: boolean, intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const unlistens: UnlistenFn[] = [];
-    let cancelled = false;
-
-    (async () => {
-      const setPortsFor = (id: string, list: number[]) => {
-        if (cancelled) return;
-        setPorts((prev) => {
-          if (list.length === 0) {
-            if (!prev.has(id)) return prev;
-            const next = new Map(prev);
-            next.delete(id);
-            return next;
-          }
-          const prevList = prev.get(id);
-          if (
-            prevList &&
-            prevList.length === list.length &&
-            prevList.every((p, i) => p === list[i])
-          ) {
-            return prev;
-          }
-          const next = new Map(prev);
-          next.set(id, list);
-          return next;
-        });
-      };
-
-      unlistens.push(
-        await listen<PortsPayload>("project:ports", (e) => {
-          setPortsFor(e.payload.id, e.payload.ports);
-        })
-      );
-
-      unlistens.push(
-        await listen<StatusPayload>("project:status", (e) => {
-          if (e.payload.status === "stopped" || e.payload.status === "crashed") {
-            setPortsFor(e.payload.id, []);
-          }
-        })
-      );
-    })();
-
-    return () => {
-      cancelled = true;
-      unlistens.forEach((u) => u());
-    };
-  }, []);
-
-  return ports;
+    if (!enabled) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(t);
+  }, [enabled, intervalMs]);
+  return now;
 }

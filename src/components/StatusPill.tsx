@@ -1,42 +1,48 @@
 import type { ProjectStatus } from "../types";
+import { useNow } from "../hooks/useRunnerEvents";
+import { formatElapsed, isActiveStatus } from "../utils";
 
 interface StatusPillProps {
   status: ProjectStatus;
-  /** Optional suffix like "Run" or "Setup" to label which action is alive. */
+  /** Which action's PTY is alive ("Run", "Build (Windows)"). */
   action?: string | null;
+  /** Why the run ended ("exit 1") — shown in the tooltip / for crashes. */
+  reason?: string | null;
+  /** Start time of the active action, for an elapsed timer. */
+  startedAtMs?: number | null;
   size?: "sm" | "md";
 }
 
 const LABELS: Record<ProjectStatus, string> = {
   stopped: "Stopped",
-  starting: "Starting…",
+  starting: "Starting",
   running: "Running",
-  stopping: "Stopping…",
+  stopping: "Stopping",
   crashed: "Crashed",
 };
 
-const DOT_COLORS: Record<ProjectStatus, string> = {
-  stopped: "var(--c-muted)",
-  starting: "var(--c-warning)",
-  running: "var(--c-success)",
-  stopping: "var(--c-warning-strong, #b45309)",
-  crashed: "var(--c-danger)",
-};
+export function StatusPill({ status, action, reason, startedAtMs, size = "sm" }: StatusPillProps) {
+  const active = isActiveStatus(status);
+  const now = useNow(active && !!startedAtMs);
+  const elapsed = active && startedAtMs ? formatElapsed(now - startedAtMs) : null;
+  const showReason = !active && reason && size === "md";
 
-export function StatusPill({ status, action, size = "sm" }: StatusPillProps) {
-  // Show "Running Run", "Running Setup" so the user knows which
-  // action's PTY they're looking at when a project can run multiple.
-  const showAction =
-    (status === "running" || status === "starting" || status === "stopping") &&
-    action;
+  const title = [
+    LABELS[status],
+    active && action ? action : null,
+    elapsed ? `for ${elapsed}` : null,
+    reason ? `(${reason})` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <span className={`status-pill status-pill--${size} status-pill--${status}`}>
-      <span
-        className="status-pill__dot"
-        style={{ background: DOT_COLORS[status] }}
-      />
-      {LABELS[status]}
-      {showAction && <span className="status-pill__action">{action}</span>}
+    <span className={`status-pill status-pill--${size} status-pill--${status}`} title={title}>
+      <span className="status-pill__dot" />
+      <span className="status-pill__label">{LABELS[status]}</span>
+      {active && action && <span className="status-pill__action">{action}</span>}
+      {elapsed && <span className="status-pill__elapsed">{elapsed}</span>}
+      {showReason && <span className="status-pill__reason">{reason}</span>}
     </span>
   );
 }

@@ -668,6 +668,41 @@ fn pick_primary_action(
     actions.first().map(|a| a.name.clone())
 }
 
+/// The action the built-in Stop runs: the first action with
+/// `icon = "stop"`, else the first named "Stop". Single source of truth
+/// for the backend; the frontend mirrors the same rule.
+pub fn stop_action(project: &ResolvedProject) -> Option<&ResolvedAction> {
+    project
+        .actions
+        .iter()
+        .find(|a| a.icon.as_deref() == Some("stop"))
+        .or_else(|| project.actions.iter().find(|a| a.name.eq_ignore_ascii_case("stop")))
+}
+
+/// True if `action` is the project's stop action (clicking it stops
+/// the current run instead of spawning a new one).
+pub fn is_stop_action(project: &ResolvedProject, action: &ResolvedAction) -> bool {
+    stop_action(project).is_some_and(|s| s.name == action.name)
+}
+
+/// The action the Build button runs: first `icon = "build"`, else the
+/// first named "Build". Never the implicit Setup.
+pub fn build_action(project: &ResolvedProject) -> Option<&ResolvedAction> {
+    let not_setup = |a: &&ResolvedAction| a.name != "Setup";
+    project
+        .actions
+        .iter()
+        .filter(not_setup)
+        .find(|a| a.icon.as_deref() == Some("build"))
+        .or_else(|| {
+            project
+                .actions
+                .iter()
+                .filter(not_setup)
+                .find(|a| a.name.eq_ignore_ascii_case("build"))
+        })
+}
+
 // =============================================================================
 // Loading, writing, validation
 // =============================================================================

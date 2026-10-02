@@ -70,9 +70,11 @@ This is a working, end-to-end build. What's in:
   chains die together)
 - ✅ Stop escalation: keystroke → SIGTERM → SIGKILL; **Stopping**
   status for instant feedback
-- ✅ Port detection via `lsof` (Unix) / `netstat` (Windows),
-  polled every 2s, clickable to open (walks the tree for
-  detached actions)
+- ✅ Port detection via `lsof` (Unix) / `netstat` (Windows) for the
+  project's own process tree only, plus URLs the app prints;
+  clickable, optional one-time auto-open on Run
+- ✅ **Install / Run** buttons for the newest build outputs
+  (`.msi` / NSIS setup / `.exe`, `.dmg` / `.app`, `.deb` / `.AppImage`)
 - ✅ **Auto-restart on crash** with retry counter, delay, and a
   transient banner
 - ✅ **In-app add/remove** projects (modal form with folder picker)
@@ -267,7 +269,7 @@ All commands live in `package.json`. Run with `pnpm <name>`.
 pnpm install            # JS deps
 pnpm tauri:info         # toolchain + package versions
 pnpm typecheck          # tsc --noEmit
-pnpm test:rust          # cargo test --lib (14 tests)
+pnpm test:rust          # cargo test --lib
 pnpm test               # typecheck + test:rust
 pnpm clean              # remove frontend dist/ and temp build files
 pnpm clean:all          # remove dist/, src-tauri/target/, and generated schemas
@@ -325,7 +327,7 @@ VibeRunner/
 │   ├── App.tsx                 # shell, state, event subscriptions
 │   ├── types.ts                # wire types (mirror Rust events/config)
 │   ├── hooks/
-│   │   └── useRunnerEvents.ts  # status / output / restarting subscriptions
+│   │   └── useRunnerEvents.ts  # runtime (status+ports, rehydrated via get_statuses), restarting
 │   └── components/
 │       ├── Sidebar.tsx
 │       ├── ProjectCard.tsx
@@ -342,10 +344,12 @@ VibeRunner/
         │                       # JSONC parse, TOML auto-discovery, atomic write
         ├── state.rs            # AppState (config + per-project handles)
         ├── events.rs           # typed Tauri events (project:* + config:reloaded)
-        ├── commands.rs         # #[tauri::command] handlers
+        ├── commands.rs         # #[tauri::command] handlers (thin)
+        ├── lifecycle.rs        # spawn / monitor / stop / ports / restart
         ├── pty.rs              # portable-pty wrapper, .env auto-load
-        ├── process.rs          # keystroke parser + process-tree kill
+        ├── process.rs          # keystrokes + identity-checked ProcessTree
         ├── ports.rs            # lsof / netstat parsing
+        ├── artifacts.rs        # build-output discovery
         ├── runner.rs           # RunnerHandle
         └── watcher.rs          # file-system watcher with debounce
 ```
@@ -386,8 +390,8 @@ VibeRunner/
 - **`.env` is loaded automatically** into the spawned PTY's env.
   If your start script also loads it (e.g. via `dotenv` or by
   sourcing it), the values are loaded twice — fine, just be aware.
-- **Windows port detection** (`netstat` parsing) is untested —
-  developed primarily on macOS.
+- **Windows port detection** parses `netstat -ano` by wildcard
+  foreign address, so it works with localized Windows too.
 
 ## Release setup
 

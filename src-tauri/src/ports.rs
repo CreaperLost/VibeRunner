@@ -1,198 +1,57 @@
-//! Cross-platform TCP port detection for a process.
+//! Cross-platform TCP port detection for a run.
 //!
-//! We poll every couple of seconds while a runner is active and emit the
-//! list of listening ports as `runner:ports` events. The frontend
-//! renders them as clickable links to `http://localhost:<port>`.
+//! Ports are attributed to a project **only** through its identity-checked
+//! process tree (see `process::ProcessTree`). The old "any process whose
+//! cwd or command line mentions the project path" heuristic pulled in
+//! VS Code, terminals and language servers, so their ports showed up as
+//! the project's — and auto-open launched browser tabs for them.
 //!
-//! - macOS / Linux: `lsof -iTCP -sTCP:LISTEN -P -n -p <pid>`.
-//! - Windows:       `netstat -ano` filtered by PID + LISTENING state.
+//! - macOS / Linux: one `lsof -a -iTCP -sTCP:LISTEN -P -n -p <pids>` call.
+//! - Windows:       one `netstat -ano` call, filtered by PID in process.
+//!
+//! URLs printed in the run's own output are kept as *hints*: they are
+//! shown only while something is actually accepting connections on them
+//! (this covers e.g. a container port-forward the tree doesn't own).
 
 use std::collections::HashSet;
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
-#[allow(dead_code)]
-pub fn detect_ports(pid: u32) -> Vec<u16> {
-    #[cfg(unix)]
-    {
-        unix_lsof(pid)
-    }
-    #[cfg(windows)]
-    {
-        windows_netstat(&HashSet::from([pid]))
-    }
-}
-
-/// Like [`detect_ports`] but aggregates listening ports from the
-/// whole process tree rooted at `root_pid`. Used for "detached"
-/// actions where the actual app is a grandchild of the PTY.
-#[allow(dead_code)]
-pub fn detect_ports_for_tree(root_pid: u32) -> Vec<u16> {
-    detect_ports_for_pids(&[root_pid])
-}
-
-/// Aggregates listening ports for all given PIDs and their descendants.
-pub fn detect_ports_for_pids(pids: &[u32]) -> Vec<u16> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
-
-    // Walk the tree.
-    let mut tree: Vec<u32> = Vec::new();
-    let mut to_visit: Vec<u32> = Vec::new();
-    for &p in pids {
-        if p != 0 && !tree.contains(&p) {
-            tree.push(p);
-            to_visit.push(p);
-        }
-    }
-
-    while let Some(cur) = to_visit.pop() {
-        let cur_pid = Pid::from_u32(cur);
-        for (child_pid, proc) in sys.processes() {
-            if let Some(parent) = proc.parent() {
-                if parent == cur_pid && !tree.contains(&child_pid.as_u32()) {
-                    let child_u32 = child_pid.as_u32();
-                    tree.push(child_u32);
-                    to_visit.push(child_u32);
-                }
-            }
-        }
-    }
-
-    if tree.is_empty() {
+/// Listening TCP ports owned by any of `pids` (no tree walk — callers
+/// pass the full tracked tree).
+pub fn listening_ports(pids: &[u32]) -> Vec<u16> {
+    let set: HashSet<u32> = pids.iter().copied().filter(|&p| p != 0).collect();
+    if set.is_empty() {
         return Vec::new();
     }
-
-    // On Unix we can ask lsof for all PIDs at once. On Windows we run
-    // `netstat -ano` once for the whole tree and filter by PID in
-    // process — it reports the owning PID for every listening socket,
-    // so there is no reason to spawn it per PID.
-    let mut all_ports: Vec<u16> = Vec::new();
     #[cfg(unix)]
     {
-        let pid_list = tree
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        if let Ok(output) = lsof_command()
-            .args([
-                "-a",
-                "-iTCP",
-                "-sTCP:LISTEN",
-                "-P",
-                "-n",
-                "-p",
-                &pid_list,
-            ])
+        let pid_list = set.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        match lsof_command()
+            .args(["-a", "-iTCP", "-sTCP:LISTEN", "-P", "-n", "-p", &pid_list])
             .output()
         {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for p in parse_lsof(stdout.as_ref()) {
-                    if !all_ports.contains(&p) {
-                        all_ports.push(p);
-                    }
-                }
-            }
+            // lsof exits 1 when nothing matched; stdout is still valid.
+            Ok(o) => parse_lsof(&String::from_utf8_lossy(&o.stdout)),
+            Err(_) => Vec::new(),
         }
     }
     #[cfg(windows)]
     {
-        for p in windows_netstat(&tree.iter().copied().collect()) {
-            if !all_ports.contains(&p) {
-                all_ports.push(p);
-            }
-        }
+        windows_netstat(&set)
     }
-    all_ports
 }
 
-/// Detect listening ports for a project given its root folder and runner PIDs.
-/// Aggregates:
-/// 1. Listening ports from `pids` and their descendants in the process tree.
-/// 2. Listening ports from any active process whose CWD or command line matches `project_path`.
-pub fn detect_ports_for_project(project_path: &std::path::Path, pids: &[u32]) -> Vec<u16> {
-    // `Pid` is only used by the Unix branch below.
-    #[cfg(unix)]
-    use sysinfo::Pid;
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-
-    let mut all_ports = detect_ports_for_pids(pids);
-
-    // Also scan all listening ports and see if any listening process belongs to `project_path`
-    #[cfg(unix)]
-    {
-        if let Ok(output) = lsof_command()
-            .args(["-iTCP", "-sTCP:LISTEN", "-P", "-n"])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut sys = System::new();
-                sys.refresh_processes_specifics(
-                    ProcessesToUpdate::All,
-                    true,
-                    ProcessRefreshKind::everything(),
-                );
-
-                for line in stdout.lines().skip(1) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() < 2 {
-                        continue;
-                    }
-                    if let Ok(pid) = parts[1].parse::<u32>() {
-                        if let Some(port) = extract_port(line) {
-                            if all_ports.contains(&port) {
-                                continue;
-                            }
-                            let path_str = project_path.to_string_lossy();
-                            let belongs_to_project = if let Some(proc) = sys.process(Pid::from_u32(pid)) {
-                                let cwd_matches = proc.cwd().map(|c| c.starts_with(project_path)).unwrap_or(false);
-                                let cmd_matches = proc.cmd().iter().any(|arg| arg.to_string_lossy().contains(path_str.as_ref()));
-                                cwd_matches || cmd_matches
-                            } else {
-                                false
-                            };
-
-                            if belongs_to_project {
-                                all_ports.push(port);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything(),
-        );
-        let path_str = project_path.to_string_lossy();
-        for (pid, proc) in sys.processes() {
-            let pid_u32 = pid.as_u32();
-            let cwd_matches = proc.cwd().map(|c| c.starts_with(project_path)).unwrap_or(false);
-            let cmd_matches = proc.cmd().iter().any(|arg| arg.to_string_lossy().contains(path_str.as_ref()));
-            if cwd_matches || cmd_matches {
-                for p in detect_ports(pid_u32) {
-                    if !all_ports.contains(&p) {
-                        all_ports.push(p);
-                    }
-                }
-            }
-        }
-    }
-
-    all_ports
+/// True if something accepts TCP connections on `port` on loopback.
+pub fn is_listening_local(port: u16) -> bool {
+    let timeout = Duration::from_millis(120);
+    ["127.0.0.1", "[::1]"].iter().any(|host| {
+        format!("{host}:{port}")
+            .parse::<SocketAddr>()
+            .ok()
+            .map(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(unix)]
@@ -201,29 +60,6 @@ fn lsof_command() -> std::process::Command {
         std::process::Command::new("/usr/sbin/lsof")
     } else {
         std::process::Command::new("lsof")
-    }
-}
-
-#[cfg(unix)]
-fn unix_lsof(pid: u32) -> Vec<u16> {
-    let output = lsof_command()
-        .args([
-            "-a",
-            "-iTCP",
-            "-sTCP:LISTEN",
-            "-P",  // no service-name translation
-            "-n",  // no hostname resolution
-            "-p",
-            &pid.to_string(),
-        ])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            parse_lsof(stdout.as_ref())
-        }
-        _ => Vec::new(),
     }
 }
 
@@ -266,77 +102,59 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Extract valid TCP listening ports from process stdout / stderr or log output.
-/// Matches patterns like:
-///   http://localhost:8501
-///   http://127.0.0.1:8000
-///   Local: http://localhost:5173/
-///   URL: http://127.0.0.1:8501
-///   port 8080, port: 8080, PORT=8080
+const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "[::]"];
+
+/// Extract app ports announced in process output. Deliberately narrow:
+///   - `http(s)://<local host>:PORT` URLs (vite, next, uvicorn, …)
+///   - "… on port PORT" phrases ("listening on port 3000")
+///
+/// Bare `host:port` text, timestamps, `file.rs:120:5` locations and
+/// words that merely contain "port" (report, support, import) are not
+/// ports and are ignored.
 pub fn extract_ports_from_text(text: &str) -> Vec<u16> {
     let clean = strip_ansi(text);
     let mut ports = Vec::new();
+    let mut push = |p: u16| {
+        if p >= 80 && !ports.contains(&p) {
+            ports.push(p);
+        }
+    };
 
     for line in clean.lines() {
-        // 1. Scan for URLs: http://...:PORT or https://...:PORT
+        // 1. Local URLs.
         let mut rem = line;
-        while let Some(proto_idx) = rem.find("http://").or_else(|| rem.find("https://")) {
-            let after_proto = &rem[proto_idx..];
-            let skip = if after_proto.starts_with("https://") { 8 } else { 7 };
-            if after_proto.len() > skip {
-                let rest = &after_proto[skip..];
-                if let Some(colon_idx) = rest.find(':') {
-                    let after_colon = &rest[colon_idx + 1..];
-                    let digits: String = after_colon
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-                    if let Ok(p) = digits.parse::<u16>() {
-                        if (80..=65535).contains(&p) && !ports.contains(&p) {
-                            ports.push(p);
+        while let Some(idx) = rem.find("://") {
+            let scheme_ok = rem[..idx].ends_with("http") || rem[..idx].ends_with("https");
+            let after = &rem[idx + 3..];
+            if scheme_ok {
+                for host in LOCAL_HOSTS {
+                    if let Some(rest) = after.strip_prefix(host) {
+                        if let Some(port_str) = rest.strip_prefix(':') {
+                            let digits: String =
+                                port_str.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            if let Ok(p) = digits.parse::<u16>() {
+                                push(p);
+                            }
                         }
+                        break;
                     }
                 }
             }
-            // Advance past this proto
-            rem = &after_proto[skip..];
+            rem = after;
         }
 
-        // 2. Scan for localhost:PORT or 127.0.0.1:PORT or 0.0.0.0:PORT
-        for host in &["localhost:", "127.0.0.1:", "0.0.0.0:"] {
-            let mut host_rem = line;
-            while let Some(idx) = host_rem.find(host) {
-                let after_host = &host_rem[idx + host.len()..];
-                let digits: String = after_host
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if let Ok(p) = digits.parse::<u16>() {
-                    if (80..=65535).contains(&p) && !ports.contains(&p) {
-                        ports.push(p);
-                    }
-                }
-                host_rem = after_host;
-            }
-        }
-
-        // 3. Scan for port keywords: "port 8080", "port: 8080", "port=8080"
+        // 2. "on port N".
         let lower = line.to_ascii_lowercase();
-        for keyword in &["port:", "port=", "port "] {
-            let mut kw_rem = lower.as_str();
-            while let Some(idx) = kw_rem.find(keyword) {
-                let after_kw = kw_rem[idx + keyword.len()..].trim_start();
-                let digits: String = after_kw
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if let Ok(p) = digits.parse::<u16>() {
-                    if (1024..=65535).contains(&p) && !ports.contains(&p) {
-                        ports.push(p);
-                    }
+        let mut kw_rem = lower.as_str();
+        while let Some(idx) = kw_rem.find("on port") {
+            let after = kw_rem[idx + 7..].trim_start_matches([' ', ':', '=']);
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(p) = digits.parse::<u16>() {
+                if p >= 1024 {
+                    push(p);
                 }
-                kw_rem = &kw_rem[idx + keyword.len()..];
             }
+            kw_rem = &kw_rem[idx + 7..];
         }
     }
 
@@ -409,16 +227,19 @@ fn parse_netstat_many(output: &str, pids: &HashSet<u32>) -> Vec<u16> {
     let mut ports = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 {
+        if parts.len() < 5 || !parts[0].eq_ignore_ascii_case("TCP") {
             continue;
         }
-        if parts[3] != "LISTENING" {
+        // The state column is localized ("LISTENING", "ABHÖREN", …), so
+        // identify listeners by their wildcard foreign address instead.
+        let foreign = parts[2];
+        if !(foreign.ends_with(":0") || foreign.ends_with(":*")) {
             continue;
         }
-        match parts[4].parse::<u32>() {
+        match parts[parts.len() - 1].parse::<u32>() {
             Ok(p) if pids.contains(&p) => {
                 if let Some(port) = extract_port(parts[1]) {
-                    if !ports.contains(&port) {
+                    if port != 0 && !ports.contains(&port) {
                         ports.push(port);
                     }
                 }
@@ -476,7 +297,7 @@ node    12345 user   24u  IPv4  0t0     TCP 127.0.0.1:8080 (LISTEN)
         let sample = "\
   TCP    0.0.0.0:4000    0.0.0.0:0    LISTENING    12345
   TCP    0.0.0.0:5000    0.0.0.0:0    LISTENING    99999
-  TCP    0.0.0.0:6000    0.0.0.0:0    ESTABLISHED  12345
+  TCP    127.0.0.1:6000  127.0.0.1:52000  ESTABLISHED  12345
   TCP    [::]:4000       [::]:0        LISTENING    12345
 ";
         let ports = parse_netstat(sample, 12345);
@@ -519,7 +340,7 @@ node    12345 user   24u  IPv4  0t0     TCP 127.0.0.1:8080 (LISTEN)
         let mut ports = Vec::new();
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            ports = detect_ports_for_pids(&[pid]);
+            ports = listening_ports(&[pid]);
             if ports.contains(&9871) {
                 break;
             }
@@ -555,12 +376,20 @@ node    12345 user   24u  IPv4  0t0     TCP 127.0.0.1:8080 (LISTEN)
     }
 
     #[test]
-    fn test_detect_ports_for_project_portable() {
-        let temp = std::env::temp_dir();
-        let ports = detect_ports_for_project(&temp, &[]);
-        // Must succeed without panicking
-        let _ = ports;
+    fn extract_ignores_non_port_noise() {
+        let noise = r"error[E0425]: src/main.rs:1528:5
+12:34:56 report 2048 rows, support 3000 users
+postgres://localhost:5432/db
+see https://github.com:443/x
+Compiling foo v0.1.0 (C:\port 9000)";
+        assert!(extract_ports_from_text(noise).is_empty(), "{:?}", extract_ports_from_text(noise));
+    }
+
+    #[test]
+    fn parse_netstat_handles_localized_state() {
+        let sample = "  TCP    0.0.0.0:4000    0.0.0.0:0    ABHÖREN    12345
+  TCP    127.0.0.1:50000    127.0.0.1:4000    HERGESTELLT    12345
+";
+        assert_eq!(parse_netstat(sample, 12345), vec![4000]);
     }
 }
-
-

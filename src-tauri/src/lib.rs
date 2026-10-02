@@ -7,6 +7,7 @@ mod artifacts;
 mod commands;
 mod config;
 mod events;
+mod lifecycle;
 mod ports;
 mod process;
 mod pty;
@@ -56,6 +57,7 @@ pub fn run() {
             commands::build_project,
             commands::stop_project,
             commands::restart_project,
+            commands::get_statuses,
             commands::write_to_pty,
             commands::reveal_in_finder,
             commands::open_path,
@@ -63,7 +65,13 @@ pub fn run() {
             commands::resize_pty,
             commands::scan_project_artifacts,
         ])
-
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Don't orphan dev servers when the window closes: the next
+            // Start would find their ports taken and bind new ones.
+            if let tauri::RunEvent::Exit = event {
+                lifecycle::kill_all(app);
+            }
+        });
 }
