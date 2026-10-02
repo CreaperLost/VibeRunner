@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl as pluginOpenUrl } from "@tauri-apps/plugin-opener";
 
+/** Platform filtering is expected; only show actionable project warnings. */
+export function visibleProjectWarnings(warnings: string[]): string[] {
+  return warnings.filter((warning) => !/^hidden on \S+ \(platform mismatch\):/.test(warning));
+}
+
 /**
  * Open a URL in the user's default browser.
  * Uses the backend `open_url` command directly to bypass plugin sandbox/capability scopes.

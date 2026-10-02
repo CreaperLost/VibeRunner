@@ -2,32 +2,52 @@
   "version": 2,
   "projects": [
     {
-      "id": "assetflow",
-      "path": "/Users/you/projects/AssetFlow-AI"
+      "id": "c-users-george-desktop-aeroessence",
+      "path": "C:\\Users\\George\\Desktop\\AeroEssence",
+      "name": null,
+      "primaryAction": null,
+      "manual": false,
+      "setup": null,
+      "build": null,
+      "actions": [],
+      "env": {},
+      "autoRestart": null
     },
     {
-      "id": "axm",
-      "path": "/Users/you/projects/Automated-X-Manager"
+      "id": "c-users-george-desktop-aeroshoot-ai",
+      "path": "C:\\Users\\George\\Desktop\\AeroShoot.AI",
+      "name": null,
+      "primaryAction": null,
+      "manual": false,
+      "setup": null,
+      "build": null,
+      "actions": [],
+      "env": {},
+      "autoRestart": null
     },
     {
-      "id": "detached-demo",
-      "name": "Detached Demo (manual)",
-      "path": "/Users/you/projects/static",
-      "manual": true,
-      "setup": { "command": "" },
-      "actions": [
-        {
-          "name": "Run",
-          "icon": "run",
-          "command": "python3 -m http.server 8080",
-          "detached": true
-        },
-        {
-          "name": "Stop",
-          "icon": "stop",
-          "command": "lsof -ti tcp:8080 | xargs kill -9"
-        }
-      ]
+      "id": "c-users-george-desktop-assetflow-ai",
+      "path": "C:\\Users\\George\\Desktop\\AssetFlow-AI",
+      "name": null,
+      "primaryAction": null,
+      "manual": false,
+      "setup": null,
+      "build": null,
+      "actions": [],
+      "env": {},
+      "autoRestart": null
+    },
+    {
+      "id": "c-users-george-desktop-viberunner",
+      "path": "C:\\Users\\George\\Desktop\\VibeRunner",
+      "name": null,
+      "primaryAction": null,
+      "manual": false,
+      "setup": null,
+      "build": null,
+      "actions": [],
+      "env": {},
+      "autoRestart": null
     }
   ]
 }

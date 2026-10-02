@@ -13,7 +13,7 @@ import { StatusPill } from "./StatusPill";
 import { LogViewer, type LogViewerHandle } from "./LogViewer";
 import { PortList } from "./PortList";
 import { useProjectRestarting } from "../hooks/useRunnerEvents";
-import { openBrowserUrl, openLocalPath } from "../utils";
+import { openBrowserUrl, openLocalPath, visibleProjectWarnings } from "../utils";
 
 interface ProjectDetailProps {
   project: ResolvedProject | null;
@@ -75,6 +75,7 @@ export function ProjectDetail({
   const isActive =
     status === "running" || status === "starting" || status === "stopping";
   const isCrashed = status === "crashed";
+  const warnings = visibleProjectWarnings(project.warnings);
   const canRunAction = !pending && !isActive;
   const canStop = !pending && (isActive || isCrashed);
   const canRestart = !pending;
@@ -268,9 +269,9 @@ export function ProjectDetail({
         </div>
       </header>
 
-      {project.warnings.length > 0 && (
+      {warnings.length > 0 && (
         <div className="detail__warnings" role="alert">
-          {project.warnings.map((w, i) => (
+          {warnings.map((w, i) => (
             <div key={i}>⚠ {w}</div>
           ))}
         </div>

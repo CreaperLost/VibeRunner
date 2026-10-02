@@ -7,6 +7,8 @@
 //! - macOS / Linux: `lsof -iTCP -sTCP:LISTEN -P -n -p <pid>`.
 //! - Windows:       `netstat -ano` filtered by PID + LISTENING state.
 
+use std::collections::HashSet;
+
 #[allow(dead_code)]
 pub fn detect_ports(pid: u32) -> Vec<u16> {
     #[cfg(unix)]
@@ -15,7 +17,7 @@ pub fn detect_ports(pid: u32) -> Vec<u16> {
     }
     #[cfg(windows)]
     {
-        windows_netstat(pid)
+        windows_netstat(&HashSet::from([pid]))
     }
 }
 
@@ -65,8 +67,10 @@ pub fn detect_ports_for_pids(pids: &[u32]) -> Vec<u16> {
         return Vec::new();
     }
 
-    // On Unix we can ask lsof for all PIDs at once (faster). On
-    // Windows we have to call netstat once per PID and merge.
+    // On Unix we can ask lsof for all PIDs at once. On Windows we run
+    // `netstat -ano` once for the whole tree and filter by PID in
+    // process — it reports the owning PID for every listening socket,
+    // so there is no reason to spawn it per PID.
     let mut all_ports: Vec<u16> = Vec::new();
     #[cfg(unix)]
     {
@@ -99,11 +103,9 @@ pub fn detect_ports_for_pids(pids: &[u32]) -> Vec<u16> {
     }
     #[cfg(windows)]
     {
-        for pid in &tree {
-            for p in detect_ports(*pid) {
-                if !all_ports.contains(&p) {
-                    all_ports.push(p);
-                }
+        for p in windows_netstat(&tree.iter().copied().collect()) {
+            if !all_ports.contains(&p) {
+                all_ports.push(p);
             }
         }
     }
@@ -115,7 +117,10 @@ pub fn detect_ports_for_pids(pids: &[u32]) -> Vec<u16> {
 /// 1. Listening ports from `pids` and their descendants in the process tree.
 /// 2. Listening ports from any active process whose CWD or command line matches `project_path`.
 pub fn detect_ports_for_project(project_path: &std::path::Path, pids: &[u32]) -> Vec<u16> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    // `Pid` is only used by the Unix branch below.
+    #[cfg(unix)]
+    use sysinfo::Pid;
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
     let mut all_ports = detect_ports_for_pids(pids);
 
@@ -339,14 +344,27 @@ pub fn extract_ports_from_text(text: &str) -> Vec<u16> {
 }
 
 
+/// Run `netstat -ano` **once** and return every listening port owned by
+/// any PID in `pids`.
+///
+/// `netstat -ano` reports the owning PID for every listening socket on
+/// the machine, so one call covers the whole process tree. We used to
+/// shell out once per PID instead, which meant a process spawn per
+/// tracked process on every 1.5s poll tick — and each of those spawns
+/// popped a console window on Windows.
 #[cfg(windows)]
-fn windows_netstat(pid: u32) -> Vec<u16> {
-    let output = std::process::Command::new("netstat").arg("-ano").output();
+fn windows_netstat(pids: &HashSet<u32>) -> Vec<u16> {
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let output = crate::process::hidden_command("netstat")
+        .arg("-ano")
+        .output();
 
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            parse_netstat(stdout.as_ref(), pid)
+            parse_netstat_many(stdout.as_ref(), pids)
         }
         _ => Vec::new(),
     }
@@ -358,6 +376,9 @@ fn windows_netstat(pid: u32) -> Vec<u16> {
 ///   node    12345  user   22u  IPv4  abcdef      0t0  TCP *:4000 (LISTEN)
 ///
 /// We skip the header row and pull the port off the end of each line.
+// Only the Unix `lsof` branch calls this, but the unit test below
+// exercises it on every platform, so keep it compiled everywhere.
+#[allow(dead_code)]
 fn parse_lsof(output: &str) -> Vec<u16> {
     let mut ports = Vec::new();
     for (i, line) in output.lines().enumerate() {
@@ -379,6 +400,12 @@ fn parse_lsof(output: &str) -> Vec<u16> {
 ///   TCP    [::]:4000       [::]:0        LISTENING    12345
 #[allow(dead_code)]
 fn parse_netstat(output: &str, target_pid: u32) -> Vec<u16> {
+    parse_netstat_many(output, &HashSet::from([target_pid]))
+}
+
+/// Same as [`parse_netstat`] but matches any PID in `pids`, so a single
+/// `netstat -ano` capture can serve a whole process tree.
+fn parse_netstat_many(output: &str, pids: &HashSet<u32>) -> Vec<u16> {
     let mut ports = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -389,7 +416,7 @@ fn parse_netstat(output: &str, target_pid: u32) -> Vec<u16> {
             continue;
         }
         match parts[4].parse::<u32>() {
-            Ok(p) if p == target_pid => {
+            Ok(p) if pids.contains(&p) => {
                 if let Some(port) = extract_port(parts[1]) {
                     if !ports.contains(&port) {
                         ports.push(port);
@@ -456,13 +483,38 @@ node    12345 user   24u  IPv4  0t0     TCP 127.0.0.1:8080 (LISTEN)
         assert_eq!(ports, vec![4000]);
     }
 
+    /// Find a Python interpreter that actually works.
+    ///
+    /// On Windows `python3` is very often the Microsoft Store *App
+    /// Execution Alias* stub: it sits on PATH, `spawn()` succeeds, and
+    /// then it immediately exits with "Python was not found". Probing
+    /// `--version` first keeps this test from failing for a reason that
+    /// has nothing to do with port detection.
+    fn working_python() -> Option<&'static str> {
+        for candidate in ["python3", "python"] {
+            let works = std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if works {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     #[test]
     fn test_detect_ports_live() {
         use std::process::Command;
-        let mut child = Command::new("python3")
+        let Some(python) = working_python() else {
+            eprintln!("skipping test_detect_ports_live: no working python3/python on PATH");
+            return;
+        };
+        let mut child = Command::new(python)
             .args(["-m", "http.server", "9871"])
             .spawn()
-            .expect("Failed to spawn python3");
+            .expect("Failed to spawn python http.server");
         let pid = child.id();
         let mut ports = Vec::new();
         for _ in 0..30 {

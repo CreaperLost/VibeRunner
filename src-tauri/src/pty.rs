@@ -22,6 +22,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
+// Only the macOS `login_shell_path` below memoises with `OnceLock`.
+#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, PtySize};
@@ -167,6 +169,9 @@ pub fn spawn(
     for (k, v) in full_env {
         cmd.env(k, v);
     }
+    // Set this after project env so a config/.env value cannot replace the action.
+    #[cfg(windows)]
+    cmd.env("VIBERUNNER_PTY_COMMAND", command);
 
     let child = pair
         .slave
@@ -200,10 +205,22 @@ pub fn spawn(
 /// platform's default shell. We pipe through a shell so users can
 /// write things like `npm run dev && echo done` or use shell
 /// variables and globs.
+#[cfg(unix)]
 fn shell_command(command: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(shell_argv0());
     cmd.arg(shell_flag());
     cmd.arg(command);
+    cmd
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new("cmd.exe");
+    // portable-pty uses C argv quoting, which escapes embedded quotes with
+    // backslashes. cmd.exe does not understand those escapes. Expand the
+    // command from the environment instead, preserving its shell syntax.
+    cmd.args(["/D", "/V:OFF", "/C", "%VIBERUNNER_PTY_COMMAND%"]);
+    cmd.env("VIBERUNNER_PTY_COMMAND", command);
     cmd
 }
 
@@ -215,16 +232,6 @@ fn shell_argv0() -> &'static str {
 #[cfg(unix)]
 fn shell_flag() -> &'static str {
     "-c"
-}
-
-#[cfg(windows)]
-fn shell_argv0() -> &'static str {
-    "cmd"
-}
-
-#[cfg(windows)]
-fn shell_flag() -> &'static str {
-    "/C"
 }
 
 #[cfg(unix)]
@@ -272,7 +279,10 @@ fn ensure_script_executable(project_path: &Path, command: &str) {
     }
 }
 
+// The real implementation is Unix-only; on Windows this stub exists so
+// the `cfg(unix)` call site in `spawn` still resolves.
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn ensure_script_executable(_project_path: &Path, _command: &str) {}
 
 // `Child` and `ChildKiller` aren't used directly here, but re-exporting
@@ -283,6 +293,61 @@ use {Child as _, ChildKiller as _};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pty_preserves_quoted_paths_and_shell_syntax() {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp_dir = std::env::temp_dir()
+            .join(format!("viberunner quoted script {}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(
+            temp_dir.join("build script.ps1"),
+            "param([string]$Value)\nWrite-Output ('SCRIPT_OK:' + $Value)\n",
+        )
+        .unwrap();
+
+        for command in [
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build script.ps1" "two words" && echo CHAIN_OK"#,
+            r#""powershell.exe" -NoProfile -ExecutionPolicy Bypass -File ".\build script.ps1" "two words" && echo CHAIN_OK"#,
+        ] {
+            let mut project_env = HashMap::new();
+            project_env.insert("VIBERUNNER_PTY_COMMAND".into(), "echo WRONG_COMMAND".into());
+            let mut spawned = spawn(command, &temp_dir, &project_env).unwrap();
+            let mut reader = spawned.master.try_clone_reader().unwrap();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut output = String::new();
+                let mut buffer = [0; 4096];
+                while let Ok(count) = reader.read(&mut buffer) {
+                    if count == 0 {
+                        break;
+                    }
+                    output.push_str(&String::from_utf8_lossy(&buffer[..count]));
+                    if output.contains("CHAIN_OK") {
+                        break;
+                    }
+                }
+                let _ = tx.send(output);
+            });
+            let output = match rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(output) => output,
+                Err(error) => {
+                    let _ = spawned.child.kill();
+                    panic!("PTY command timed out: {error}");
+                }
+            };
+            let status = spawned.child.wait().unwrap();
+            drop(spawned.master);
+            assert!(status.success(), "{output}");
+            assert!(output.contains("SCRIPT_OK:two words"), "{output}");
+            assert!(output.contains("CHAIN_OK"), "{output}");
+        }
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
 
     #[test]
     fn test_load_project_env_layers_correctly() {

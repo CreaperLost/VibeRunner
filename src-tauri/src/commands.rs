@@ -569,7 +569,9 @@ pub fn open_url(url: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new("cmd");
+        // `cmd /C start` is a console program, so spawn it hidden —
+        // otherwise opening a link flashes a terminal window.
+        let mut cmd = crate::process::hidden_command("cmd");
         cmd.args(["/C", "start", "", &url]);
         match cmd.spawn() {
             Ok(_) => Ok(()),
@@ -682,7 +684,7 @@ fn stop_project_internal(project_id: &str, app: &AppHandle) {
                 cmd_obj.arg("-c").arg(&stop_act.command);
 
                 #[cfg(windows)]
-                let mut cmd_obj = std::process::Command::new("cmd");
+                let mut cmd_obj = crate::process::hidden_command("cmd");
                 #[cfg(windows)]
                 cmd_obj.arg("/C").arg(&stop_act.command);
 

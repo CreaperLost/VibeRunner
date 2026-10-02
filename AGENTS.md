@@ -30,6 +30,13 @@ Each **project** is a folder on disk. VibeRunner can either:
   name = "Stop"
   icon = "stop"
   command = "bash scripts/stop.sh"
+
+  # Optional: scope an action to one OS. Absent = everywhere.
+  [[actions]]
+  name = "Start (Windows)"
+  icon = "run"
+  platform = "windows"
+  command = 'powershell.exe -File ".\scripts\start.ps1"'
   ```
   VibeRunner turns each `[[actions]]` entry into a button.
 
@@ -38,6 +45,14 @@ Each **project** is a folder on disk. VibeRunner can either:
 
 Either way, every project gets a built-in **Restart** button (Stop →
 Setup → the action named "Run" or icon="run", in that order).
+
+`platform` matters for that rule. Restart and Stop both resolve their
+action by **first icon match**, so a cross-platform repo that declares
+a bash action and a PowerShell action sharing an `icon` and no
+`platform` will silently pick the bash one on Windows. Scope both sets
+(`platform = "unix"` / `platform = "windows"`) and the resolver filters
+to the running OS *before* picking, so both buttons land correctly.
+Actions dropped this way are reported in `ResolvedProject.warnings`.
 
 `.env` files inside a project are auto-loaded into the spawned PTY's
 environment (lower priority than `vibe.config.json` env, higher than
@@ -48,9 +63,15 @@ the parent shell's env).
 ```
 VibeRunner/
 ├── vibe.config.json            # list of projects (each = a folder)
+├── .codex/
+│   └── environments/
+│       └── environment.toml    # VibeRunner's OWN Start/Stop/Build actions
+│                               # (per-OS; see "VibeRunner as its own project")
 ├── assets/
 │   └── icon-source.png         # 1024×1024 mark; `pnpm icon` regenerates all sizes
 ├── scripts/
+│   ├── dev.sh / dev.ps1        # per-OS dev launcher: start | stop
+│   ├── build.sh / build.ps1    # per-OS validation + frontend build
 │   └── generate-icon.py        # PIL script that builds icon-source.png
 ├── src/                        # React + TS frontend
 │   ├── App.tsx                 # shell, state, event subscriptions
@@ -183,7 +204,9 @@ their TOML. If you need a different shape:
    fields (e.g. an icon mapping).
 3. The backend doesn't care what an action is named — any
    `[[actions]]` entry becomes a button. The naming only affects
-   "Restart" (which picks the first "Run"-shaped action).
+   "Restart" (which picks the first "Run"-shaped action). Icons are
+   load-bearing for both Restart and Stop; use `platform` to keep
+   per-OS actions from colliding on the same icon.
 
 ### Code style
 
@@ -197,6 +220,24 @@ their TOML. If you need a different shape:
 
 ## Common pitfalls
 
+- **Never spawn a helper process without `hidden_command()`.** The
+  release build is a GUI-subsystem app with no console, so Windows
+  allocates a *brand-new console window* for every console child
+  (`taskkill`, `netstat`, `cmd`). That's the "terminal keeps popping
+  up" bug. Use `process::hidden_command()` (it applies
+  `CREATE_NO_WINDOW`) for anything VibeRunner spawns on the user's
+  behalf. `kill_pids` also only signals tree *roots* on Windows,
+  because `taskkill /T` already covers descendants — one spawn per
+  root, not one per process.
+- **`powershell.exe -File` rejects forward slashes.** A command like
+  `-File "./scripts/run.ps1"` dies with *"Illegal characters in
+  path"* before the script opens. Use `-File ".\scripts\run.ps1"`.
+  This is a PowerShell CLI quirk, not a path-resolution problem, so
+  VibeRunner can't paper over it — the project config must use
+  backslashes.
+- **Icon collisions decide Restart and Stop.** Both pick the *first*
+  action with a matching `icon`. See "Cross-platform action sets" in
+  the model section above.
 - **`pnpm tauri build` runs from CWD `src-tauri/`, not project root.**
   That's why the config loader walks up from CWD looking for
   `vibe.config.json`. Don't break that.
@@ -261,8 +302,37 @@ pnpm verify
 (This runs the test suite then does `tauri build --debug`, which is
 slower but catches issues that test:rust alone might miss.)
 
-## Release setup (deferred)
+## VibeRunner as its own project
 
+VibeRunner consumes its own `environment.toml`, so the config is a
+live test of the feature it implements. `.codex/environments/environment.toml`
+declares Start / Stop / Build, each in a `unix` and a `windows` variant
+sharing the same `icon`, plus a three-way `Package` split (macOS /
+Linux / Windows) replacing the old macOS-only "Build .app" that failed
+elsewhere.
+
+`scripts/dev.sh` and `scripts/dev.ps1` are the launchers. The contract
+they exist to guarantee:
+
+- **Stop touches only what Start launched.** Start records the root
+  PID *and its start time* in `.codex/viberunner-dev.state`; Stop
+  re-checks both before signalling. The start-time check is not
+  decoration — the OS recycles PIDs, and without it a stale state file
+  could eventually kill an unrelated process.
+- **Start → Stop → Start is deterministic.** Stop waits for the tree
+  to actually exit and always removes the state file, so the next
+  Start never races a dying process or a stale port.
+- **Both are idempotent.** Stop with nothing running exits 0 and says
+  so; Start with a live process refuses instead of stacking a second
+  dev server.
+
+`.codex/*` is gitignored except the TOML, so the state file is
+runtime-only. `config::tests::repo_environment_toml_resolves_to_one_action_per_icon`
+guards the invariant that after filtering, exactly one action survives
+per icon — two survivors on one icon is the ambiguity that silently
+made Restart pick the bash script on Windows.
+
+## Release setup (deferred)
 No CI workflow yet. To actually ship:
 
 1. Get the Apple Developer Program ($99/yr) and/or a Windows EV cert

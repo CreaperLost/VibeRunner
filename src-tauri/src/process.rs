@@ -30,6 +30,33 @@ pub fn parse_keystrokes(s: &str) -> Vec<u8> {
 pub const GRACE_AFTER_KEYSTROKE: Duration = Duration::from_secs(3);
 pub const GRACE_AFTER_SIGTERM: Duration = Duration::from_secs(3);
 
+// ===== Hidden child processes ==============================================
+//
+// Release builds are GUI-subsystem processes (`main.rs` sets
+// `windows_subsystem = "windows"`), which means the app owns **no
+// console of its own**. When a console-subsystem child is spawned from
+// a process with no console, Windows cannot attach it to anything, so
+// it allocates a brand-new console window for it — the user sees a
+// terminal flash open and vanish. `taskkill` and `netstat` are both
+// console programs, so every helper spawn produced one of these.
+//
+// `CREATE_NO_WINDOW` tells Windows to run the child with its console
+// hidden instead. It is a no-op on other platforms.
+//
+// Use this for **every** helper process we spawn. Do not use it for
+// things the user is meant to see or interact with.
+#[allow(unused_mut)]
+pub fn hidden_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 // ===== Process-tree kill ===================================================
 //
 // `npm run dev` typically spawns a chain like:
@@ -202,18 +229,41 @@ pub fn discover_pid_files(project_path: &std::path::Path) -> Vec<u32> {
 
 /// Terminate all processes in `pids` and their descendants.
 pub fn kill_pids(pids: &[u32], force: bool) {
-    let mut sys = System::new_all();
-    sys.refresh_processes(ProcessesToUpdate::All, false);
-
-    let mut all_pids = HashSet::new();
-    for &pid in pids {
-        if pid != 0 {
-            for desc in collect_descendants_in(&sys, pid) {
-                all_pids.insert(desc);
-            }
-        }
+    let set: HashSet<u32> = pids.iter().copied().filter(|&p| p != 0).collect();
+    if set.is_empty() {
+        return;
     }
-    for pid in all_pids {
+
+    // Callers hand us a *flat* set — the root plus every descendant we
+    // have ever tracked. Signalling all of them is not just wasteful,
+    // it is user-visible on Windows: each `taskkill` spawn used to pop
+    // a console window, so one stop produced one terminal per process
+    // in the tree, most of them for PIDs that had already exited.
+    //
+    // On Windows `taskkill /T` already walks and terminates the whole
+    // subtree, so signalling the *roots* is sufficient and equivalent.
+    // On Unix we send a raw signal to a single PID with no group
+    // semantics, so every node still has to be signalled explicitly.
+    #[cfg(windows)]
+    let targets: Vec<u32> = {
+        let mut sys = System::new_all();
+        sys.refresh_processes(ProcessesToUpdate::All, false);
+        set.iter()
+            .copied()
+            .filter(|&pid| {
+                // Skip anything whose parent is also in the set — the
+                // ancestor's `/T` covers it.
+                !sys.process(Pid::from_u32(pid))
+                    .and_then(|p| p.parent())
+                    .map(|parent| set.contains(&parent.as_u32()))
+                    .unwrap_or(false)
+            })
+            .collect()
+    };
+    #[cfg(not(windows))]
+    let targets: Vec<u32> = set.iter().copied().collect();
+
+    for pid in targets {
         terminate_pid(pid, force);
     }
 }
@@ -250,7 +300,10 @@ fn terminate_pid(pid: u32, _force: bool) {
     // `TerminateProcess`es each node. We always pass /F because
     // graceful termination of a console tree is unreliable without a
     // shared console handle, which `portable_pty` doesn't expose.
-    let _ = std::process::Command::new("taskkill")
+    //
+    // `hidden_command` is what keeps this from flashing a console
+    // window at the user on every single call.
+    let _ = hidden_command("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .output();
 }

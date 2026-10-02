@@ -186,7 +186,7 @@ is set and non-empty.
 | `project.primaryAction` | string | no | Action the built-in **Restart** runs. Defaults to first action with `name="Run"` or `icon="run"`. |
 | `project.manual` | boolean | no | Skip TOML discovery; use inline `actions` + `setup` |
 | `project.setup` | object | no | Inline `{ "command": "..." }` for manual projects |
-| `project.actions` | array | no | Inline `[{ name, icon?, command }]` for manual projects |
+| `project.actions` | array | no | Inline `[{ name, icon?, command, platform? }]` for manual projects |
 | `project.env` | object | no | Extra env vars (manual projects) — overrides `.env` |
 | `project.autoRestart` | object | no | `{ enabled, maxRetries, delayMs }` (manual projects) |
 
@@ -201,6 +201,38 @@ is set and non-empty.
 | `actions[].icon` | string | Optional; one of `run`, `stop`, `tool`, `build`, `test`, `migrate` |
 | `actions[].command` | string | The shell command (runs through `sh -c` / `cmd /C`) |
 | `actions[].detached` | bool | If `true`, VibeRunner tracks the whole process tree (for `nohup start.sh &` patterns) |
+| `actions[].platform` | string | Optional; `windows`, `unix`, `macos`, `linux`, or `any`. Absent = available everywhere |
+
+### Cross-platform action sets
+
+A repo that needs a different command per OS declares a parallel set
+of actions and scopes each one with `platform`:
+
+```toml
+[[actions]]
+name = "Start"
+icon = "run"
+platform = "unix"
+command = "./script/build_and_run.sh"
+
+[[actions]]
+name = "Start (Windows)"
+icon = "run"
+platform = "windows"
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\script\run.ps1" run'
+```
+
+This matters because **Restart** and **Stop** pick an action by
+matching `icon` — the first match wins. If both sets share an `icon`
+and neither declares a `platform`, Windows silently resolves to the
+bash variant, which cannot run there. Scoping the actions fixes both
+buttons at once. Actions hidden by a `platform` mismatch are listed
+in the project's warnings, so a missing button is never silent.
+
+> **Windows gotcha:** `powershell.exe -File` rejects forward slashes
+> and fails with *"Illegal characters in path"*. Use `.\script\run.ps1`.
+> (`-Command "& './script/run.ps1'"` accepts forward slashes if you
+> prefer one cross-platform string.)
 
 ### How `.env` is loaded
 

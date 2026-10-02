@@ -1454,13 +1454,14 @@ code {
 
 .form-action-row {
   display: grid;
-  grid-template-columns: 90px 70px 1fr auto auto;
+  grid-template-columns: 90px 70px 1fr 92px auto auto;
   gap: 6px;
   align-items: center;
   margin-bottom: 4px;
 }
 
-.form-action-row input[type="text"] {
+.form-action-row input[type="text"],
+.form-action-row select {
   padding: 5px 8px;
   border: 1px solid var(--c-border-strong);
   border-radius: var(--radius-sm);

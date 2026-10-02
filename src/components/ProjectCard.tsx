@@ -6,7 +6,7 @@ import type {
   VibeConfigReloadedPayload,
 } from "../types";
 import { StatusPill } from "./StatusPill";
-import { openLocalPath } from "../utils";
+import { openLocalPath, visibleProjectWarnings } from "../utils";
 
 interface ProjectCardProps {
   project: ResolvedProject;
@@ -70,6 +70,7 @@ export function ProjectCard({
 }: ProjectCardProps) {
   const [removing, setRemoving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const warnings = visibleProjectWarnings(project.warnings);
 
   const handleRemove = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -202,12 +203,12 @@ export function ProjectCard({
         <div className="runner-card__status-group">{statusPill}</div>
       </div>
       <code className="runner-card__command">{actionSummary || "(no actions)"}</code>
-      {project.warnings.length > 0 && (
+      {warnings.length > 0 && (
         <div
           className="runner-card__warning"
-          title={project.warnings.join("\n")}
+          title={warnings.join("\n")}
         >
-          ⚠ {project.warnings[0]}
+          ⚠ {warnings[0]}
         </div>
       )}
       <div className="runner-card__footer">

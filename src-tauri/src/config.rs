@@ -135,6 +135,70 @@ pub struct ProjectConfig {
     pub auto_restart: Option<RestartPolicy>,
 }
 
+/// Which operating system an action targets.
+///
+/// Cross-platform repos usually need a parallel set of actions — a
+/// bash script and a PowerShell script, say — and both sets will claim
+/// the same `icon`. Without this field VibeRunner picks the *first*
+/// matching action for Restart and Stop, which on Windows silently
+/// resolves to the bash variant that cannot possibly run.
+///
+/// Absent means "every platform", so existing configs are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    #[default]
+    Any,
+    Windows,
+    Unix,
+    MacOs,
+    Linux,
+}
+
+impl Platform {
+    fn as_str(self) -> &'static str {
+        match self {
+            Platform::Any => "any",
+            Platform::Windows => "windows",
+            Platform::Unix => "unix",
+            Platform::MacOs => "macos",
+            Platform::Linux => "linux",
+        }
+    }
+
+    /// `true` if this platform is the one we're running on.
+    fn is_current(self) -> bool {
+        match self {
+            Platform::Any => true,
+            Platform::Windows => cfg!(target_os = "windows"),
+            // "unix" is the catch-all for anything POSIX.
+            Platform::Unix => cfg!(unix),
+            Platform::MacOs => cfg!(target_os = "macos"),
+            Platform::Linux => cfg!(target_os = "linux"),
+        }
+    }
+}
+
+/// The platform this binary was built for, as it appears in warnings.
+fn current_platform() -> Platform {
+    if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else {
+        Platform::Linux
+    }
+}
+
+/// `true` if an action declared with `platform` should be offered here.
+/// `None` (field absent) means "no restriction".
+fn action_runs_here(platform: Option<Platform>) -> bool {
+    match platform {
+        None => true,
+        Some(p) => p.is_current(),
+    }
+}
+
 /// A shell command. Currently just a string; kept as a struct so we
 /// can extend it later (cwd, env, etc.) without breaking the JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +220,10 @@ pub struct ActionConfig {
     /// returned. Defaults to `false` (wait for the direct child).
     #[serde(default)]
     pub detached: bool,
+    /// Restrict this action to one OS. Absent = available
+    /// everywhere. See [`Platform`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
 }
 
 /// Auto-restart behaviour on crash. When `enabled` is true, a non-zero
@@ -242,6 +310,9 @@ struct TomlAction {
     command: String,
     #[serde(default)]
     detached: bool,
+    /// Restrict this action to one OS. Absent = available everywhere.
+    #[serde(default)]
+    platform: Option<Platform>,
 }
 
 /// Read the TOML environment file from `<project>/.codex/environments/environment.toml`.
@@ -391,6 +462,10 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
     let mut warnings = Vec::new();
     let mut actions: Vec<ResolvedAction> = Vec::new();
     let mut source = ProjectSource::Empty;
+    // Names of declared actions that were dropped because they target a
+    // different OS. Surfaced as a warning so a vanished button is
+    // explainable rather than mysterious.
+    let mut hidden_actions: Vec<String> = Vec::new();
 
     let path = PathBuf::from(&project.path);
     if !path.exists() {
@@ -423,6 +498,10 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
             }
         }
         for a in &project.actions {
+            if !action_runs_here(a.platform) {
+                hidden_actions.push(a.name.clone());
+                continue;
+            }
             actions.push(ResolvedAction {
                 name: a.name.clone(),
                 icon: a.icon.clone(),
@@ -469,6 +548,10 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
                     }
                 }
                 for a in &toml_env.actions {
+                    if !action_runs_here(a.platform) {
+                        hidden_actions.push(a.name.clone());
+                        continue;
+                    }
                     actions.push(ResolvedAction {
                         name: a.name.clone(),
                         icon: a.icon.clone(),
@@ -492,6 +575,7 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
                     .clone()
                     .or(toml_env.name.clone())
                     .unwrap_or_else(|| project.id.clone());
+                push_platform_warning(&mut warnings, &hidden_actions);
                 return ResolvedProject {
                     id: project.id.clone(),
                     name,
@@ -532,6 +616,8 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
         .clone()
         .unwrap_or_else(|| project.id.clone());
 
+    push_platform_warning(&mut warnings, &hidden_actions);
+
     ResolvedProject {
         id: project.id.clone(),
         name,
@@ -543,6 +629,20 @@ pub fn resolve_project(project: &ProjectConfig) -> ResolvedProject {
         auto_restart: project.auto_restart.clone(),
         env: project.env.clone(),
     }
+}
+
+/// Note which actions were filtered out, so a button that vanished
+/// because of a `platform` mismatch is visible in the UI rather than
+/// silently missing.
+fn push_platform_warning(warnings: &mut Vec<String>, hidden: &[String]) {
+    if hidden.is_empty() {
+        return;
+    }
+    warnings.push(format!(
+        "hidden on {} (platform mismatch): {}",
+        current_platform().as_str(),
+        hidden.join(", ")
+    ));
 }
 
 /// Pick the action the built-in "Restart" button should run.
@@ -1051,12 +1151,14 @@ command = "echo run"
                     icon: Some("run".into()),
                     command: "python3 -m http.server 8080".into(),
                     detached: false,
+                    platform: None,
                 },
                 ActionConfig {
                     name: "Stop".into(),
                     icon: Some("stop".into()),
                     command: "Ctrl+C".into(),
                     detached: false,
+                    platform: None,
                 },
             ],
             env: Default::default(),
@@ -1088,6 +1190,7 @@ command = "echo run"
                     icon: Some("run".into()),
                     command: "npm start".into(),
                     detached: false,
+                    platform: None,
                 },
             ],
             env: Default::default(),
@@ -1171,12 +1274,14 @@ command = "echo run"
                     icon: Some("run".into()),
                     command: "echo run".into(),
                     detached: false,
+                    platform: None,
                 },
                 ActionConfig {
                     name: "Stop".into(),
                     icon: Some("stop".into()),
                     command: "echo stop".into(),
                     detached: false,
+                    platform: None,
                 },
             ],
             env: Default::default(),
@@ -1203,12 +1308,14 @@ command = "echo run"
                     icon: Some("run".into()),
                     command: "nohup start.sh &".into(),
                     detached: true,
+                    platform: None,
                 },
                 ActionConfig {
                     name: "Stop".into(),
                     icon: Some("stop".into()),
                     command: "Ctrl+C".into(),
                     detached: false,
+                    platform: None,
                 },
             ],
             env: Default::default(),
@@ -1286,5 +1393,336 @@ command = "echo run"
         assert_eq!(loaded.projects[0].id, "p1");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ---- platform-filtered actions ----------------------------------------
+
+    /// The platform that is *not* this build's platform.
+    fn other_platform() -> Platform {
+        if current_platform() == Platform::Windows {
+            Platform::Unix
+        } else {
+            Platform::Windows
+        }
+    }
+
+    /// Regression test for the AssetFlow-AI shape: a cross-platform
+    /// project declaring a bash action and a PowerShell action that
+    /// share the same `icon`. Without `platform`, first-match-wins
+    /// resolves Restart and Stop to the bash variant, which cannot run
+    /// on Windows.
+    #[test]
+    fn platform_filter_picks_the_action_for_this_os() {
+        let project = ProjectConfig {
+            id: "plat".into(),
+            path: "/tmp/plat".into(),
+            name: None,
+            primary_action: None,
+            manual: true,
+            setup: None,
+            build: None,
+            actions: vec![
+                ActionConfig {
+                    name: "Start (other)".into(),
+                    icon: Some("run".into()),
+                    command: "other-platform-runner".into(),
+                    detached: false,
+                    platform: Some(other_platform()),
+                },
+                ActionConfig {
+                    name: "Start (native)".into(),
+                    icon: Some("run".into()),
+                    command: "native-runner".into(),
+                    detached: false,
+                    platform: Some(current_platform()),
+                },
+            ],
+            env: Default::default(),
+            auto_restart: None,
+        };
+
+        let resolved = resolve_project(&project);
+        assert_eq!(
+            resolved.actions.len(),
+            1,
+            "only this OS's action should survive, got {:?}",
+            resolved.actions
+        );
+        assert_eq!(resolved.actions[0].name, "Start (native)");
+        // Restart must target the survivor, not the first declared one.
+        assert_eq!(resolved.primary_action.as_deref(), Some("Start (native)"));
+        // A button that vanished should be explainable in the UI.
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.contains("Start (other)")),
+            "hidden action should be reported, warnings were {:?}",
+            resolved.warnings
+        );
+    }
+
+    /// An action with no `platform` must stay available everywhere, so
+    /// every pre-existing config keeps working unchanged.
+    #[test]
+    fn absent_platform_keeps_action_on_every_os() {
+        let project = ProjectConfig {
+            id: "nopl".into(),
+            path: "/tmp/nopl".into(),
+            name: None,
+            primary_action: None,
+            manual: true,
+            setup: None,
+            build: None,
+            actions: vec![
+                ActionConfig {
+                    name: "Run".into(),
+                    icon: Some("run".into()),
+                    command: "echo run".into(),
+                    detached: false,
+                    platform: None,
+                },
+                ActionConfig {
+                    name: "Stop".into(),
+                    icon: Some("stop".into()),
+                    command: "echo stop".into(),
+                    detached: false,
+                    platform: None,
+                },
+            ],
+            env: Default::default(),
+            auto_restart: None,
+        };
+
+        let resolved = resolve_project(&project);
+        assert_eq!(resolved.actions.len(), 2);
+        assert_eq!(resolved.primary_action.as_deref(), Some("Run"));
+        assert!(
+            !resolved.warnings.iter().any(|w| w.contains("platform mismatch")),
+            "nothing should be hidden, warnings were {:?}",
+            resolved.warnings
+        );
+    }
+
+    #[test]
+    fn action_platform_is_optional_in_json() {
+        let action: ActionConfig =
+            serde_json::from_str(r#"{"name":"Run","icon":"run","command":"x"}"#).unwrap();
+        assert_eq!(action.platform, None);
+        // Absent must not round-trip as an explicit null, or every
+        // project would get a noisy `"platform": null` on next save.
+        let text = serde_json::to_string(&action).unwrap();
+        assert!(
+            !text.contains("platform"),
+            "absent platform should not be serialized, got {text}"
+        );
+
+        let scoped: ActionConfig =
+            serde_json::from_str(r#"{"name":"Run","command":"x","platform":"windows"}"#).unwrap();
+        assert_eq!(scoped.platform, Some(Platform::Windows));
+    }
+
+    /// The auto-discovered TOML path must honour `platform` too, since
+    /// that is how a codex-style repo declares its actions.
+    #[test]
+    fn toml_actions_can_be_platform_scoped() {
+        let tmp = std::env::temp_dir().join(format!(
+            "viberunner-plat-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".codex/environments")).unwrap();
+        std::fs::write(
+            tmp.join(".codex/environments/environment.toml"),
+            r#"
+version = 1
+name = "Cross Platform"
+
+[[actions]]
+name = "Start (other)"
+icon = "run"
+platform = "__OTHER__"
+command = "other-runner"
+
+[[actions]]
+name = "Start (native)"
+icon = "run"
+platform = "__NATIVE__"
+command = "native-runner"
+"#
+            .replace("__OTHER__", other_platform().as_str())
+            .replace("__NATIVE__", current_platform().as_str()),
+        )
+        .unwrap();
+
+        let project = ProjectConfig {
+            id: "cross".into(),
+            path: tmp.to_string_lossy().into_owned(),
+            name: None,
+            primary_action: None,
+            manual: false,
+            setup: None,
+            build: None,
+            actions: vec![],
+            env: Default::default(),
+            auto_restart: None,
+        };
+
+        let resolved = resolve_project(&project);
+        let names: Vec<&str> = resolved.actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"Start (native)"),
+            "native action missing from {names:?}"
+        );
+        assert!(
+            !names.contains(&"Start (other)"),
+            "foreign action leaked through: {names:?}"
+        );
+        assert_eq!(resolved.primary_action.as_deref(), Some("Start (native)"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `platform` must survive a save/reload cycle, otherwise the UI's
+    /// config editor would silently strip the scoping and a per-OS
+    /// project would go back to picking the wrong action set.
+    #[test]
+    fn platform_survives_config_save_and_reload() {
+        let temp_dir = std::env::temp_dir().join(format!("viberunner_plat_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("vibe.config.json");
+
+        let mut cfg = VibeConfig::default();
+        cfg.projects.push(ProjectConfig {
+            id: "p".into(),
+            path: "/path".into(),
+            name: None,
+            primary_action: None,
+            manual: true,
+            setup: None,
+            build: None,
+            actions: vec![
+                ActionConfig {
+                    name: "Start (Windows)".into(),
+                    icon: Some("run".into()),
+                    command: "x".into(),
+                    detached: false,
+                    platform: Some(Platform::Windows),
+                },
+                ActionConfig {
+                    name: "Start (Unix)".into(),
+                    icon: Some("run".into()),
+                    command: "y".into(),
+                    detached: false,
+                    platform: Some(Platform::Unix),
+                },
+                ActionConfig {
+                    name: "Anywhere".into(),
+                    icon: Some("tool".into()),
+                    command: "z".into(),
+                    detached: false,
+                    platform: None,
+                },
+            ],
+            env: Default::default(),
+            auto_restart: None,
+        });
+
+        write_to_path(&config_path, &cfg).expect("write failed");
+        let loaded = load_from_path(&config_path).expect("load failed");
+        let actions = &loaded.projects[0].actions;
+        assert_eq!(actions[0].platform, Some(Platform::Windows));
+        assert_eq!(actions[1].platform, Some(Platform::Unix));
+        assert_eq!(actions[2].platform, None);
+
+        // An unscoped action must not gain a `"platform": null` key,
+        // which would litter every existing project config on save.
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !text.contains("\"platform\": null"),
+            "unscoped action serialized a null platform: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Guard on VibeRunner's own `.codex/environments/environment.toml`.
+    ///
+    /// After platform filtering there must be exactly one action per
+    /// icon — two survivors on the same icon is precisely the ambiguity
+    /// that made Restart/Stop pick the bash script on Windows. It also
+    /// asserts the survivor is this platform's script, i.e. the config
+    /// never falls back to another platform's command.
+    #[test]
+    fn repo_environment_toml_resolves_to_one_action_per_icon() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .to_path_buf();
+        assert!(
+            root.join(".codex/environments/environment.toml").is_file(),
+            "repo environment.toml missing at {}",
+            root.display()
+        );
+
+        let project = ProjectConfig {
+            id: "self".into(),
+            path: root.to_string_lossy().into_owned(),
+            name: None,
+            primary_action: None,
+            manual: false,
+            setup: None,
+            build: None,
+            actions: vec![],
+            env: Default::default(),
+            auto_restart: None,
+        };
+
+        let resolved = resolve_project(&project);
+        assert_eq!(resolved.source, ProjectSource::Toml);
+        assert!(
+            !resolved
+                .warnings
+                .iter()
+                .any(|w| w.contains("could not read TOML")),
+            "own TOML failed to parse: {:?}",
+            resolved.warnings
+        );
+
+        for icon in ["run", "stop", "build"] {
+            let matching: Vec<&str> = resolved
+                .actions
+                .iter()
+                .filter(|a| a.icon.as_deref() == Some(icon))
+                .map(|a| a.name.as_str())
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "expected exactly one '{icon}' action on {}, got {matching:?}",
+                current_platform().as_str()
+            );
+        }
+
+        // The surviving run action must invoke this platform's launcher.
+        let run = resolved
+            .actions
+            .iter()
+            .find(|a| a.icon.as_deref() == Some("run"))
+            .expect("a run action survived");
+        let expected = if current_platform() == Platform::Windows {
+            "dev.ps1"
+        } else {
+            "dev.sh"
+        };
+        assert!(
+            run.command.contains(expected),
+            "on {} the run action should use {expected}, got {:?}",
+            current_platform().as_str(),
+            run.command
+        );
+
+        // Restart must target that same action.
+        assert_eq!(resolved.primary_action.as_deref(), Some(run.name.as_str()));
     }
 }

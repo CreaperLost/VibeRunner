@@ -31,6 +31,16 @@ export interface ActionConfig {
    * Default `false`.
    */
   detached?: boolean;
+  /**
+   * Restrict this action to one OS: `windows`, `unix`, `macos`,
+   * `linux`, or `any`. Absent/null means available everywhere.
+   *
+   * This is load-bearing, not cosmetic: Restart and Stop resolve
+   * their action by first `icon` match, so a cross-platform project
+   * whose per-OS actions share an `icon` must scope them or Windows
+   * will pick the bash variant.
+   */
+  platform?: string | null;
 }
 
 /**

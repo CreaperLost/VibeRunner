@@ -1,20 +1,97 @@
+# VibeRunner's own Codex environment.
+#
+# `platform` scopes an action to one OS. Restart and Stop both resolve
+# their action by first `icon` match, so a per-OS pair that shares an
+# icon (Start / Start (Windows) are both icon="run") MUST be scoped or
+# Windows silently resolves to the bash one, which cannot run there.
+# Actions with no `platform` run everywhere.
+#
+# Windows commands use native PowerShell. Note the backslashes:
+# `powershell.exe -File` rejects forward slashes outright with
+# "Illegal characters in path".
+#
+# Prerequisites: Node 20+, pnpm, and the Rust toolchain (see
+# `pnpm tauri:info`). Stop is scoped to processes these scripts started —
+# see scripts/dev.sh and scripts/dev.ps1.
+
 version = 1
 name = "VibeRunner"
 
+# pnpm install behaves identically on all three platforms.
 [setup]
 script = "pnpm install"
 
-[[actions]]
-name = "Build .app"
-icon = "build"
-command = "bash scripts/build-app.sh"
+# ---- Start ---------------------------------------------------------------
+# Runs `pnpm tauri dev` in the foreground so vite/cargo output streams
+# into the log viewer. The launcher records its own PID + start time
+# before exec'ing, which is what makes Stop exact.
 
 [[actions]]
-name = "Run"
+name = "Start"
 icon = "run"
-command = "pnpm tauri dev"
+platform = "unix"
+command = "./scripts/dev.sh start"
+
+[[actions]]
+name = "Start (Windows)"
+icon = "run"
+platform = "windows"
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\dev.ps1" start'
+
+# ---- Stop ----------------------------------------------------------------
+# Kills only the tree rooted at the PID the launcher recorded, and only
+# after re-checking that PID's start time. Idempotent: safe to run when
+# nothing is running, and leaves no stale state behind, so
+# Start -> Stop -> Start is deterministic.
 
 [[actions]]
 name = "Stop"
 icon = "stop"
-command = "Ctrl+C"
+platform = "unix"
+command = "./scripts/dev.sh stop"
+
+[[actions]]
+name = "Stop (Windows)"
+icon = "stop"
+platform = "windows"
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\dev.ps1" stop'
+
+# ---- Build ---------------------------------------------------------------
+# The fast every-commit gate: typecheck + Rust tests + frontend bundle.
+# Native on all three platforms (pnpm is cross-platform), but kept
+# per-OS so the invocation matches the surrounding shell convention.
+
+[[actions]]
+name = "Build"
+icon = "build"
+platform = "unix"
+command = "./scripts/build.sh"
+
+[[actions]]
+name = "Build (Windows)"
+icon = "build"
+platform = "windows"
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build.ps1"'
+
+# ---- Package -------------------------------------------------------------
+# Full distributable. Slow (3-5 min: Rust release compile + bundler),
+# so it is a separate action from Build. This replaces the old
+# macOS-only "Build .app", which failed on Windows and Linux.
+
+[[actions]]
+name = "Package (macOS)"
+icon = "tool"
+platform = "macos"
+command = "pnpm build:mac"
+
+[[actions]]
+name = "Package (Linux)"
+icon = "tool"
+platform = "linux"
+command = "pnpm build:linux"
+
+[[actions]]
+name = "Package (Windows)"
+icon = "tool"
+platform = "windows"
+command = "pnpm build:win"

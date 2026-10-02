@@ -34,8 +34,8 @@ function emptyForm(): FormState {
     setupCommand: "",
     buildCommand: "",
     actions: [
-      { name: "Run", icon: "run", command: "", detached: false },
-      { name: "Stop", icon: "stop", command: "", detached: false },
+      { name: "Run", icon: "run", command: "", detached: false, platform: null },
+      { name: "Stop", icon: "stop", command: "", detached: false, platform: null },
     ],
   };
 }
@@ -95,7 +95,7 @@ export function ProjectForm({ existingIds, onClose, onAdded }: ProjectFormProps)
       ...f,
       actions: [
         ...f.actions,
-        { name: "", icon: "", command: "", detached: false },
+        { name: "", icon: "", command: "", detached: false, platform: null },
       ],
     }));
   const removeAction = (i: number) =>
@@ -312,6 +312,21 @@ export function ProjectForm({ existingIds, onClose, onAdded }: ProjectFormProps)
                       placeholder="command"
                       className="form-action-cmd"
                     />
+                    <select
+                      value={a.platform ?? ""}
+                      onChange={(e) =>
+                        setAction(i, { platform: e.target.value || null })
+                      }
+                      className="form-action-platform"
+                      title="Restrict this action to one OS. Needed when per-OS actions share an icon — Restart and Stop pick the first matching icon."
+                      aria-label="Platform"
+                    >
+                      <option value="">any OS</option>
+                      <option value="windows">windows</option>
+                      <option value="unix">unix</option>
+                      <option value="macos">macos</option>
+                      <option value="linux">linux</option>
+                    </select>
                     <label
                       className="form-action-detached"
                       title="Check if the command detaches (e.g. nohup ... &) — VibeRunner will then track the whole process tree"
